@@ -16,6 +16,12 @@ from langchain.agents import create_react_agent, AgentExecutor, Tool
 # Load environment variables from .env file
 load_dotenv()
 
+# Get and validate API key
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")
+if OPENAI_API_KEY:
+    OPENAI_API_KEY = OPENAI_API_KEY.strip()  # Remove any whitespace
+    os.environ["OPENAI_API_KEY"] = OPENAI_API_KEY  # Update environment
+
 # Constants
 PDF_URL = "https://download1.fbr.gov.pk/Docs/20241021010287106PakistanCustomsTariff-2024-25.pdf"
 PDF_PATH = "pct_latest.pdf"
@@ -74,8 +80,13 @@ def download_latest_pdf(url, save_path):
 # Function to build or load vector store
 @st.cache_resource
 def get_vectorstore():
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        st.error("OPENAI_API_KEY not found in environment variables.")
+        return None
+    
     if os.path.exists(FAISS_INDEX_PATH):
-        embeddings = OpenAIEmbeddings()
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         vectorstore = FAISS.load_local(FAISS_INDEX_PATH, embeddings, allow_dangerous_deserialization=True)
         st.info("Loaded existing FAISS index.")
         return vectorstore
@@ -93,7 +104,7 @@ def get_vectorstore():
         )
         texts = text_splitter.split_documents(documents)
 
-        embeddings = OpenAIEmbeddings()
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key)
         vectorstore = FAISS.from_documents(texts, embeddings)
         vectorstore.save_local(FAISS_INDEX_PATH)
         st.success("Built and saved new FAISS index.")
@@ -101,7 +112,11 @@ def get_vectorstore():
 
 # Set up RAG chain
 def setup_qa_chain(vectorstore):
-    llm = ChatOpenAI(temperature=0.5)  # Increased for fuzzy matching
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        st.error("OPENAI_API_KEY not found in environment variables.")
+        return None
+    llm = ChatOpenAI(temperature=0.5, openai_api_key=api_key)  # Increased for fuzzy matching
 
     prompt_template = """Use the following HS code context to answer the question. Provide the exact HS/PCT code, description, and any duty rates or notes (including whether duty is ad valorem (%) or specific (e.g., PKR/kg)). If classifying an item, match it to the closest heading/subheading using fuzzy matching for vague terms. If the item is ambiguous or complex, return a markdown table in the format below, followed by a clarification request:
 
@@ -264,11 +279,19 @@ with st.sidebar:
     st.info("Using FY 2024-25 Tariff (latest available as of August 2025). Check FBR for FY 2025-26 updates.")
 
 # Initialize session state
-if "OPENAI_API_KEY" not in os.environ:
+api_key = os.getenv("OPENAI_API_KEY", "").strip()
+if not api_key:
     st.error("OpenAI API key not set. Please check your .env file at E:\\RAG_HS_Code\\.env or set it manually.")
+    st.stop()
 else:
     vectorstore = get_vectorstore()
+    if vectorstore is None:
+        st.error("Failed to initialize vectorstore. Please check your API key and try again.")
+        st.stop()
     qa_chain = setup_qa_chain(vectorstore)
+    if qa_chain is None:
+        st.error("Failed to initialize QA chain. Please check your API key and try again.")
+        st.stop()
     st.session_state.qa_chain = qa_chain
 
     if "messages" not in st.session_state:
@@ -276,7 +299,8 @@ else:
     if "memory" not in st.session_state:
         st.session_state.memory = ConversationBufferMemory(memory_key="chat_history", input_key="input")
 
-    llm = ChatOpenAI(temperature=0.5)
+    api_key = os.getenv("OPENAI_API_KEY", "").strip()
+    llm = ChatOpenAI(temperature=0.5, openai_api_key=api_key)
     agent = create_react_agent(llm, tools, agent_prompt)
     agent_executor = AgentExecutor(
         agent=agent,
