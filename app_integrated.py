@@ -2267,13 +2267,36 @@ with tabs[tab_idx]:
                         st.session_state.last_search_result = all_source_data
 
                     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                    st.markdown('<div class="success-box">', unsafe_allow_html=True)
-                    st.markdown("**Search Results**")
                     if result:
-                        st.markdown(result)
+                        # Parse structured fields from RAG response
+                        _hs_m = re.search(r'(?:HS|PCT|Code)[:\s]*(\d{4}[.\s]?\d{4})', result, re.IGNORECASE)
+                        _desc_m = re.search(r'Description[:\s]*(.+?)(?:Customs|CD|Sales|$)', result, re.IGNORECASE | re.DOTALL)
+                        _cd_m = re.search(r'(?:Customs\s*Duty|CD)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+                        _st_m = re.search(r'(?:Sales\s*Tax|ST)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+                        _it_m = re.search(r'(?:Income\s*Tax|IT|Advance\s*Tax)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+
+                        if _hs_m:
+                            _hs_code = _hs_m.group(1).replace(' ', '.')
+                            _desc = _desc_m.group(1).strip().rstrip('- ').strip() if _desc_m else ""
+                            _cd = f"{_cd_m.group(1)}%" if _cd_m else "—"
+                            _st = f"{_st_m.group(1)}%" if _st_m else "18%"
+                            _it = f"{_it_m.group(1)}%" if _it_m else "6%"
+                            st.markdown(f'''
+                            <div style="background:#E8F5E9;border-left:4px solid #1B5E20;padding:16px;border-radius:8px;margin-bottom:12px">
+                                <div style="font-size:13px;color:#666;margin-bottom:4px">Best Match</div>
+                                <div style="font-size:22px;font-weight:bold;color:#1B5E20;margin-bottom:6px">{_hs_code}</div>
+                                <div style="font-size:15px;color:#333;margin-bottom:10px">{_desc}</div>
+                                <div style="display:flex;gap:24px">
+                                    <span style="background:#1B5E20;color:white;padding:4px 12px;border-radius:4px">CD: {_cd}</span>
+                                    <span style="background:#2E7D32;color:white;padding:4px 12px;border-radius:4px">ST: {_st}</span>
+                                    <span style="background:#388E3C;color:white;padding:4px 12px;border-radius:4px">IT: {_it}</span>
+                                </div>
+                            </div>''', unsafe_allow_html=True)
+                        else:
+                            # Couldn't parse structured data — show as formatted text
+                            st.markdown(f'<div class="success-box">{result}</div>', unsafe_allow_html=True)
                     else:
                         st.warning("No results found")
-                    st.markdown('</div>', unsafe_allow_html=True)
 
                     # Text search: show matching codes grouped by chapter
                     if not is_numeric:
@@ -2301,9 +2324,16 @@ with tabs[tab_idx]:
                                                 nearby
                                             )
                                             desc = desc_m.group(1).strip()[:80] if desc_m else ""
+                                            # Clean description: strip leading dashes, trailing duty rate numbers
+                                            desc = re.sub(r'^[\-–\s]+', '', desc)  # "- - Nightshirts 20" → "Nightshirts 20"
+                                            cd_trail = re.search(r'\s+(\d{1,3})$', desc)
+                                            cd_val = None
+                                            if cd_trail:
+                                                cd_val = float(cd_trail.group(1))
+                                                desc = desc[:cd_trail.start()].strip()  # "Nightshirts 20" → "Nightshirts"
                                             all_text_matches.append({
                                                 'code': code, 'description': desc,
-                                                'unit': _detect_unit(desc), 'customs_duty': None
+                                                'unit': _detect_unit(desc), 'customs_duty': cd_val
                                             })
                         except Exception:
                             pass
