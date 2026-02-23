@@ -254,6 +254,17 @@ try:
 except Exception:
     MODULE_STATUS["data_updater"] = False
 
+# Pakistan LLM Search
+try:
+    from pakistan.llm_search import LLMHSSearch
+    from pakistan.pct_hierarchy import (
+        get_classification_path, get_heading_description,
+        is_part_not_product, HEADING_DESCRIPTIONS
+    )
+    MODULE_STATUS["llm_search"] = True
+except Exception:
+    MODULE_STATUS["llm_search"] = False
+
 
 # ---------------------------------------------------------------------------
 # Configuration (use Phase 5 app_config or fallback to inline constants)
@@ -1522,6 +1533,61 @@ def normalize_hs_code(code):
     return code
 
 
+def _build_tariff_data_for_search():
+    """Build {hs_code: {description: ...}} dict from caches for LLM validation."""
+    if 'tariff_data_for_search' in st.session_state:
+        return st.session_state.tariff_data_for_search
+
+    import sqlite3
+    tariff_data = {}
+
+    # 1. WEBOC cache DB
+    try:
+        db_path = os.path.join(os.path.dirname(__file__), "weboc_cache.db")
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            for row in conn.execute("SELECT hs_code, description FROM duty_data WHERE description IS NOT NULL AND description != ''"):
+                tariff_data[row[0]] = {'description': row[1]}
+            conn.close()
+    except Exception:
+        pass
+
+    # 2. TIPP cache DB
+    try:
+        db_path = os.path.join(os.path.dirname(__file__), "tipp_cache.db")
+        if os.path.exists(db_path):
+            conn = sqlite3.connect(db_path)
+            for row in conn.execute("SELECT hs_code, data_json FROM tipp_cache"):
+                if row[0] not in tariff_data:
+                    try:
+                        data = json.loads(row[1])
+                        tariff_data[row[0]] = {'description': data.get('description', '')}
+                    except Exception:
+                        pass
+            conn.close()
+    except Exception:
+        pass
+
+    # 3. FAISS vectorstore — parse HS codes from document chunks
+    try:
+        vs = st.session_state.get('vectorstore')
+        if vs and len(tariff_data) < 100:
+            all_docs = vs.similarity_search("customs tariff", k=50)
+            code_pat = re.compile(r'(\d{4}\.\d{4})\s*[\|:\-–]?\s*(.+?)(?:\n|\d{4}\.\d{4}|$)')
+            for doc in all_docs:
+                for m in code_pat.finditer(doc.page_content):
+                    code, desc = m.group(1), m.group(2).strip()[:100]
+                    if code not in tariff_data and desc:
+                        tariff_data[code] = {'description': desc}
+    except Exception:
+        pass
+
+    if tariff_data:
+        st.session_state.tariff_data_for_search = tariff_data
+
+    return tariff_data
+
+
 def _invoke_qa_chain(query):
     """Invoke QA chain with optional Phase 3 caching."""
     if MODULE_STATUS.get("query_cache") and "query_cache" in st.session_state:
@@ -2010,6 +2076,10 @@ if MODULE_STATUS.get("source_orchestrator") and 'orchestrator' not in st.session
         sro_database_module=_sro_mod if MODULE_STATUS.get("sro_database") else None,
     )
 
+# LLM Search session state
+if MODULE_STATUS.get("llm_search") and 'llm_searcher' not in st.session_state:
+    st.session_state.llm_searcher = LLMHSSearch(model="gpt-4o-mini")
+
 # ---------------------------------------------------------------------------
 # Header
 # ---------------------------------------------------------------------------
@@ -2187,6 +2257,18 @@ with tabs[tab_idx]:
         st.write("")
         search_btn = st.button("Search", use_container_width=True, type="primary", key="search_hs")
 
+    # Search mode toggle
+    if MODULE_STATUS.get("llm_search"):
+        search_mode = st.radio(
+            "Search Mode",
+            ["Smart Search (EN / Urdu / Roman Urdu)", "Document Search (RAG)"],
+            horizontal=True,
+            help="Smart Search uses AI to understand natural language in any language. Document Search queries the PCT PDF directly.",
+            key="search_mode_radio",
+        )
+    else:
+        search_mode = "Document Search (RAG)"
+
     st.markdown("**Quick Examples:**")
     ex_cols = st.columns(4)
     examples = [
@@ -2200,242 +2282,339 @@ with tabs[tab_idx]:
                 search_btn = True
 
     if search_btn and hs_input:
-        if 'qa_chain' not in st.session_state:
-            st.error("System not initialized. Please refresh the page.")
-        else:
-            cat_info = _detect_broad_category(hs_input)
+        # ---- Smart Search (LLM) path ----
+        if "Smart Search" in search_mode and MODULE_STATUS.get("llm_search") and 'llm_searcher' in st.session_state:
+            with st.spinner("Analyzing query..."):
+                tariff_data = _build_tariff_data_for_search()
+                llm_result = st.session_state.llm_searcher.search(hs_input, tariff_data)
 
-            # --- Broad category path (chapter / heading / subheading) ---
-            if cat_info['is_broad']:
-                level_label = cat_info['level'].title()
-                chapter_name = cat_info['chapter_name']
+            llm = llm_result.get('llm_result')
+            if llm:
                 st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                st.markdown(
-                    f'<div class="info-box"><b>{level_label} {cat_info["code"]}</b>'
-                    f' &mdash; {chapter_name}<br>'
-                    f'This is a broad {cat_info["level"]}. Select a specific 8-digit code below.</div>',
-                    unsafe_allow_html=True,
+                # What LLM understood
+                st.caption(
+                    f"Understood: **{llm.get('understood_query', '')}** "
+                    f"| Language: {llm.get('language_detected', 'en')}"
                 )
 
-                with st.spinner(f"Loading sub-codes under {cat_info['code']}..."):
-                    subcodes = _get_subcodes(cat_info['code'])
+                # Ignored terms
+                ignored = llm.get('ignored_terms', [])
+                if ignored:
+                    reason = llm.get('ignored_reason', 'Not classified in HS system')
+                    st.info(f"Terms not used in HS classification: **{', '.join(ignored)}** — {reason}")
 
-                if subcodes:
-                    st.success(f"Found {len(subcodes)} sub-codes under {cat_info['code']}")
-                    # Header row
-                    hdr = st.columns([2, 5, 1, 1])
-                    with hdr[0]:
-                        st.markdown("**HS Code**")
-                    with hdr[1]:
-                        st.markdown("**Description**")
-                    with hdr[2]:
-                        st.markdown("**CD %**")
-                    with hdr[3]:
-                        st.markdown("")
-                    for sc in subcodes:
-                        cd_display = f"{sc['customs_duty']}%" if sc['customs_duty'] is not None else "—"
-                        desc_short = (sc['description'][:60] + "...") if len(sc.get('description', '') or '') > 60 else (sc.get('description') or '')
-                        cols = st.columns([2, 5, 1, 1])
-                        with cols[0]:
-                            st.text(sc['code'])
-                        with cols[1]:
-                            st.text(desc_short or "—")
-                        with cols[2]:
-                            st.text(cd_display)
-                        with cols[3]:
-                            if st.button("Select", key=f"sub_{sc['code']}"):
-                                all_source_data = _fetch_hs_data_all_sources(sc['code'])
+                # Disambiguation
+                disambig = llm.get('disambiguation')
+                if disambig:
+                    st.warning(disambig)
+
+                # Likely codes from LLM
+                likely = llm.get('likely_codes', [])
+                if likely:
+                    for i, suggestion in enumerate(likely):
+                        code = suggestion.get('code', '')
+                        desc = suggestion.get('description', '')
+                        conf = suggestion.get('confidence', '')
+                        reason = suggestion.get('reasoning', '')
+
+                        badge_map = {'high': '#4CAF50', 'medium': '#FF9800', 'low': '#F44336'}
+                        badge_color = badge_map.get(conf, '#999')
+                        conf_label = conf.title() if conf else 'Unknown'
+
+                        # Get hierarchy breadcrumb
+                        hierarchy = get_classification_path(code) if MODULE_STATUS.get("llm_search") else {}
+                        heading_ctx = get_heading_description(code) if MODULE_STATUS.get("llm_search") else ''
+                        is_part = is_part_not_product(desc) if MODULE_STATUS.get("llm_search") else False
+
+                        with st.expander(
+                            f"{'[HIGH]' if conf == 'high' else '[MED]' if conf == 'medium' else '[LOW]'} {code} — {desc[:80]}",
+                            expanded=(i == 0),
+                        ):
+                            # Hierarchy breadcrumb
+                            if hierarchy:
+                                st.caption(
+                                    f"Section {hierarchy.get('section', '')} > "
+                                    f"Chapter {hierarchy.get('chapter', '')} "
+                                    f"({hierarchy.get('chapter_desc', '')}) > "
+                                    f"{hierarchy.get('heading', '')} > {code}"
+                                )
+
+                            if heading_ctx:
+                                st.markdown(f"**Heading:** {heading_ctx}")
+
+                            st.markdown(f"**Description:** {desc}")
+                            st.markdown(
+                                f'**Confidence:** <span style="background:{badge_color};color:white;'
+                                f'padding:2px 8px;border-radius:4px;font-size:13px">{conf_label}</span>',
+                                unsafe_allow_html=True,
+                            )
+                            st.markdown(f"**Reasoning:** {reason}")
+
+                            if is_part:
+                                st.warning("This is a PART/ACCESSORY, not a complete product")
+
+                            bcol1, bcol2 = st.columns(2)
+                            with bcol1:
+                                if st.button("Use in Calculator", key=f"calc_{code}_{i}"):
+                                    all_source_data = _fetch_hs_data_all_sources(code)
+                                    st.session_state.last_search_result = all_source_data
+                                    st.session_state.prefill_data = all_source_data
+                                    st.rerun()
+                            with bcol2:
+                                if st.button("Lookup Full Rates", key=f"weboc_{code}_{i}"):
+                                    all_source_data = _fetch_hs_data_all_sources(code)
+                                    st.session_state.last_search_result = all_source_data
+                                    st.rerun()
+
+                # Data matches from tariff cache
+                data_matches = llm_result.get('matches', [])
+                if data_matches:
+                    st.markdown(f"**Validated Data Matches ({len(data_matches)}):**")
+                    for m in data_matches[:10]:
+                        with st.expander(f"{m['hs_code']} — {m.get('description', '')[:80]}"):
+                            st.write(f"**Code:** {m['hs_code']}")
+                            st.write(f"**Description:** {m.get('description', '')}")
+                            if m.get('llm_reasoning'):
+                                st.caption(f"Match reason: {m['llm_reasoning']}")
+                            if st.button("Use This Code", key=f"dm_{m['hs_code']}"):
+                                all_source_data = _fetch_hs_data_all_sources(m['hs_code'])
                                 st.session_state.last_search_result = all_source_data
                                 st.rerun()
-                else:
-                    st.warning("No sub-codes found in cache. Try entering more digits or a description.")
-
-            # --- Specific code or text search path ---
             else:
-                with st.spinner("Searching Pakistan Customs Tariff..."):
-                    is_numeric = re.match(r'^\d{2,4}\.?\d{0,4}$', hs_input.replace('.', ''))
-                    if is_numeric:
-                        normalized = normalize_hs_code(hs_input)
-                        query = f"What is the classification, description, and Customs Duty for HS code {normalized}?"
-                    else:
-                        query = f"Classify '{hs_input}' to HS code with description and Customs Duty"
+                st.error("Smart search could not process query. Falling back to Document Search...")
+                search_mode = "Document Search (RAG)"
 
-                    result = _invoke_qa_chain(query)
+        # ---- Document Search (RAG) path ----
+        if "Document Search" in search_mode:
+            if 'qa_chain' not in st.session_state:
+                st.error("System not initialized. Please refresh the page.")
+            else:
+                cat_info = _detect_broad_category(hs_input)
 
-                    if is_numeric:
-                        all_source_data = _fetch_hs_data_all_sources(hs_input)
-                        st.session_state.last_search_result = all_source_data
-
+                # --- Broad category path (chapter / heading / subheading) ---
+                if cat_info['is_broad']:
+                    level_label = cat_info['level'].title()
+                    chapter_name = cat_info['chapter_name']
                     st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
-                    if result:
-                        # Parse structured fields from RAG response
-                        _hs_m = re.search(r'(?:HS|PCT|Code)[:\s]*(\d{4}[.\s]?\d{4})', result, re.IGNORECASE)
-                        _desc_m = re.search(r'Description[:\s]*(.+?)(?:Customs|CD|Sales|$)', result, re.IGNORECASE | re.DOTALL)
-                        _cd_m = re.search(r'(?:Customs\s*Duty|CD)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
-                        _st_m = re.search(r'(?:Sales\s*Tax|ST)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
-                        _it_m = re.search(r'(?:Income\s*Tax|IT|Advance\s*Tax)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+                    st.markdown(
+                        f'<div class="info-box"><b>{level_label} {cat_info["code"]}</b>'
+                        f' &mdash; {chapter_name}<br>'
+                        f'This is a broad {cat_info["level"]}. Select a specific 8-digit code below.</div>',
+                        unsafe_allow_html=True,
+                    )
 
-                        if _hs_m:
-                            _hs_code = _hs_m.group(1).replace(' ', '.')
-                            _desc = _desc_m.group(1).strip().rstrip('- ').strip() if _desc_m else ""
-                            _cd = f"{_cd_m.group(1)}%" if _cd_m else "—"
-                            _st = f"{_st_m.group(1)}%" if _st_m else "18%"
-                            _it = f"{_it_m.group(1)}%" if _it_m else "6%"
-                            st.markdown(f'''
-                            <div style="background:#E8F5E9;border-left:4px solid #1B5E20;padding:16px;border-radius:8px;margin-bottom:12px">
-                                <div style="font-size:13px;color:#666;margin-bottom:4px">Best Match</div>
-                                <div style="font-size:22px;font-weight:bold;color:#1B5E20;margin-bottom:6px">{_hs_code}</div>
-                                <div style="font-size:15px;color:#333;margin-bottom:10px">{_desc}</div>
-                                <div style="display:flex;gap:24px">
-                                    <span style="background:#1B5E20;color:white;padding:4px 12px;border-radius:4px">CD: {_cd}</span>
-                                    <span style="background:#2E7D32;color:white;padding:4px 12px;border-radius:4px">ST: {_st}</span>
-                                    <span style="background:#388E3C;color:white;padding:4px 12px;border-radius:4px">IT: {_it}</span>
-                                </div>
-                            </div>''', unsafe_allow_html=True)
-                        else:
-                            # Couldn't parse structured data — show as formatted text
-                            st.markdown(f'<div class="success-box">{result}</div>', unsafe_allow_html=True)
+                    with st.spinner(f"Loading sub-codes under {cat_info['code']}..."):
+                        subcodes = _get_subcodes(cat_info['code'])
+
+                    if subcodes:
+                        st.success(f"Found {len(subcodes)} sub-codes under {cat_info['code']}")
+                        hdr = st.columns([2, 5, 1, 1])
+                        with hdr[0]:
+                            st.markdown("**HS Code**")
+                        with hdr[1]:
+                            st.markdown("**Description**")
+                        with hdr[2]:
+                            st.markdown("**CD %**")
+                        with hdr[3]:
+                            st.markdown("")
+                        for sc in subcodes:
+                            cd_display = f"{sc['customs_duty']}%" if sc['customs_duty'] is not None else "—"
+                            desc_short = (sc['description'][:60] + "...") if len(sc.get('description', '') or '') > 60 else (sc.get('description') or '')
+                            cols = st.columns([2, 5, 1, 1])
+                            with cols[0]:
+                                st.text(sc['code'])
+                            with cols[1]:
+                                st.text(desc_short or "—")
+                            with cols[2]:
+                                st.text(cd_display)
+                            with cols[3]:
+                                if st.button("Select", key=f"sub_{sc['code']}"):
+                                    all_source_data = _fetch_hs_data_all_sources(sc['code'])
+                                    st.session_state.last_search_result = all_source_data
+                                    st.rerun()
                     else:
-                        st.warning("No results found")
+                        st.warning("No sub-codes found in cache. Try entering more digits or a description.")
 
-                    # Text search: show matching codes grouped by chapter
-                    if not is_numeric:
-                        all_text_matches = []
-                        seen_codes = set()
+                # --- Specific code or text search path ---
+                else:
+                    with st.spinner("Searching Pakistan Customs Tariff..."):
+                        is_numeric = re.match(r'^\d{2,4}\.?\d{0,4}$', hs_input.replace('.', ''))
+                        if is_numeric:
+                            normalized = normalize_hs_code(hs_input)
+                            query = f"What is the classification, description, and Customs Duty for HS code {normalized}?"
+                        else:
+                            query = f"Classify '{hs_input}' to HS code with description and Customs Duty"
 
-                        # 1. PRIMARY: Search vectorstore/PCT descriptions directly
-                        #    This searches the actual tariff PDF data — no manual mapping needed
-                        try:
-                            vs = st.session_state.get('vectorstore')
-                            if vs:
-                                docs = vs.similarity_search(hs_input, k=20)
-                                code_pattern = re.compile(r'\b(\d{4}\.\d{4})\b')
-                                for doc in docs:
-                                    text = doc.page_content
-                                    codes_in_doc = code_pattern.findall(text)
-                                    for code in codes_in_doc:
-                                        if code not in seen_codes:
-                                            seen_codes.add(code)
-                                            # Extract description near the code
-                                            idx = text.find(code)
-                                            nearby = text[idx:idx+200] if idx >= 0 else ""
-                                            desc_m = re.search(
-                                                r'\d{4}\.\d{4}\s*[\|:\-–]?\s*(.+?)(?:\n|\d{4}\.\d{4}|$)',
-                                                nearby
-                                            )
-                                            desc = desc_m.group(1).strip()[:80] if desc_m else ""
-                                            # Clean description: strip leading dashes, trailing duty rate numbers
-                                            desc = re.sub(r'^[\-–\s]+', '', desc)  # "- - Nightshirts 20" → "Nightshirts 20"
-                                            cd_trail = re.search(r'\s+(\d{1,3})$', desc)
-                                            cd_val = None
-                                            if cd_trail:
-                                                cd_val = float(cd_trail.group(1))
-                                                desc = desc[:cd_trail.start()].strip()  # "Nightshirts 20" → "Nightshirts"
-                                            all_text_matches.append({
-                                                'code': code, 'description': desc,
-                                                'unit': _detect_unit(desc), 'customs_duty': cd_val
-                                            })
-                        except Exception:
-                            pass
+                        result = _invoke_qa_chain(query)
 
-                        # 2. WEBOC description search (if cache loaded)
-                        try:
-                            weboc_matches = st.session_state.weboc_scraper.search_hs_codes_autocomplete(hs_input, limit=50)
-                            for m in weboc_matches:
-                                if m['code'] not in seen_codes:
-                                    seen_codes.add(m['code'])
-                                    all_text_matches.append({
-                                        'code': m['code'], 'description': m.get('description', ''),
-                                        'unit': m.get('unit', 'units'), 'customs_duty': None
-                                    })
-                        except Exception:
-                            pass
+                        if is_numeric:
+                            all_source_data = _fetch_hs_data_all_sources(hs_input)
+                            st.session_state.last_search_result = all_source_data
 
-                        # 3. FALLBACK: Keyword chapter mapping + sub-codes (when above sources find little)
-                        if len(all_text_matches) < 5:
-                            kw_chapters = _get_chapters_for_keyword(hs_input)
-                            if kw_chapters:
-                                ch_labels = ", ".join(
-                                    f"Chapter {ch} ({HS_CHAPTERS.get(ch, '')})" for ch in kw_chapters
-                                )
-                                st.markdown(
-                                    f'<div class="info-box"><b>Related Chapters:</b> {ch_labels}</div>',
-                                    unsafe_allow_html=True,
-                                )
-                                with st.spinner(f"Loading HS codes for '{hs_input}'..."):
-                                    for ch in kw_chapters:
-                                        ch_subcodes = _get_subcodes(ch, limit=50)
-                                        for sc in ch_subcodes:
-                                            if sc['code'] not in seen_codes:
-                                                seen_codes.add(sc['code'])
-                                                all_text_matches.append(sc)
+                        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+                        if result:
+                            _hs_m = re.search(r'(?:HS|PCT|Code)[:\s]*(\d{4}[.\s]?\d{4})', result, re.IGNORECASE)
+                            _desc_m = re.search(r'Description[:\s]*(.+?)(?:Customs|CD|Sales|$)', result, re.IGNORECASE | re.DOTALL)
+                            _cd_m = re.search(r'(?:Customs\s*Duty|CD)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+                            _st_m = re.search(r'(?:Sales\s*Tax|ST)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
+                            _it_m = re.search(r'(?:Income\s*Tax|IT|Advance\s*Tax)[:\s()]*(\d+(?:\.\d+)?)\s*%', result, re.IGNORECASE)
 
-                        # 4. Score each result by match strength, sort best → worst
-                        if all_text_matches:
-                            for m in all_text_matches:
-                                m['_score'] = _match_strength(hs_input, m.get('description', ''))
-                            all_text_matches.sort(key=lambda x: x['_score'], reverse=True)
+                            if _hs_m:
+                                _hs_code = _hs_m.group(1).replace(' ', '.')
+                                _desc = _desc_m.group(1).strip().rstrip('- ').strip() if _desc_m else ""
+                                _cd = f"{_cd_m.group(1)}%" if _cd_m else "—"
+                                _st = f"{_st_m.group(1)}%" if _st_m else "18%"
+                                _it = f"{_it_m.group(1)}%" if _it_m else "6%"
+                                st.markdown(f'''
+                                <div style="background:#E8F5E9;border-left:4px solid #1B5E20;padding:16px;border-radius:8px;margin-bottom:12px">
+                                    <div style="font-size:13px;color:#666;margin-bottom:4px">Best Match</div>
+                                    <div style="font-size:22px;font-weight:bold;color:#1B5E20;margin-bottom:6px">{_hs_code}</div>
+                                    <div style="font-size:15px;color:#333;margin-bottom:10px">{_desc}</div>
+                                    <div style="display:flex;gap:24px">
+                                        <span style="background:#1B5E20;color:white;padding:4px 12px;border-radius:4px">CD: {_cd}</span>
+                                        <span style="background:#2E7D32;color:white;padding:4px 12px;border-radius:4px">ST: {_st}</span>
+                                        <span style="background:#388E3C;color:white;padding:4px 12px;border-radius:4px">IT: {_it}</span>
+                                    </div>
+                                </div>''', unsafe_allow_html=True)
+                            else:
+                                st.markdown(f'<div class="success-box">{result}</div>', unsafe_allow_html=True)
+                        else:
+                            st.warning("No results found")
 
-                            st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
+                        # Text search: show matching codes grouped by chapter
+                        if not is_numeric:
+                            all_text_matches = []
+                            seen_codes = set()
 
-                            # Header row
-                            hdr = st.columns([1, 2, 5, 1, 1])
-                            with hdr[0]:
-                                st.markdown("**Match**")
-                            with hdr[1]:
-                                st.markdown("**HS Code**")
-                            with hdr[2]:
-                                st.markdown("**Description**")
-                            with hdr[3]:
-                                st.markdown("**CD %**")
-                            with hdr[4]:
-                                st.markdown("")
+                            # 1. PRIMARY: Search vectorstore/PCT descriptions directly
+                            try:
+                                vs = st.session_state.get('vectorstore')
+                                if vs:
+                                    docs = vs.similarity_search(hs_input, k=20)
+                                    code_pattern = re.compile(r'\b(\d{4}\.\d{4})\b')
+                                    for doc in docs:
+                                        text = doc.page_content
+                                        codes_in_doc = code_pattern.findall(text)
+                                        for code in codes_in_doc:
+                                            if code not in seen_codes:
+                                                seen_codes.add(code)
+                                                idx = text.find(code)
+                                                nearby = text[idx:idx+200] if idx >= 0 else ""
+                                                desc_m = re.search(
+                                                    r'\d{4}\.\d{4}\s*[\|:\-–]?\s*(.+?)(?:\n|\d{4}\.\d{4}|$)',
+                                                    nearby
+                                                )
+                                                desc = desc_m.group(1).strip()[:80] if desc_m else ""
+                                                desc = re.sub(r'^[\-–\s]+', '', desc)
+                                                cd_trail = re.search(r'\s+(\d{1,3})$', desc)
+                                                cd_val = None
+                                                if cd_trail:
+                                                    cd_val = float(cd_trail.group(1))
+                                                    desc = desc[:cd_trail.start()].strip()
+                                                all_text_matches.append({
+                                                    'code': code, 'description': desc,
+                                                    'unit': _detect_unit(desc), 'customs_duty': cd_val
+                                                })
+                            except Exception:
+                                pass
 
-                            for item in all_text_matches:
-                                score = item.get('_score', 0)
-                                color = _strength_color(score)
-                                cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
-                                desc_text = (item.get('description') or '—')[:70]
-                                ic = st.columns([1, 2, 5, 1, 1])
-                                with ic[0]:
+                            # 2. WEBOC description search (if cache loaded)
+                            try:
+                                weboc_matches = st.session_state.weboc_scraper.search_hs_codes_autocomplete(hs_input, limit=50)
+                                for m in weboc_matches:
+                                    if m['code'] not in seen_codes:
+                                        seen_codes.add(m['code'])
+                                        all_text_matches.append({
+                                            'code': m['code'], 'description': m.get('description', ''),
+                                            'unit': m.get('unit', 'units'), 'customs_duty': None
+                                        })
+                            except Exception:
+                                pass
+
+                            # 3. FALLBACK: Keyword chapter mapping + sub-codes
+                            if len(all_text_matches) < 5:
+                                kw_chapters = _get_chapters_for_keyword(hs_input)
+                                if kw_chapters:
+                                    ch_labels = ", ".join(
+                                        f"Chapter {ch} ({HS_CHAPTERS.get(ch, '')})" for ch in kw_chapters
+                                    )
                                     st.markdown(
-                                        f'<span style="color:{color};font-weight:bold">{score}%</span>',
+                                        f'<div class="info-box"><b>Related Chapters:</b> {ch_labels}</div>',
                                         unsafe_allow_html=True,
                                     )
-                                with ic[1]:
-                                    st.text(item['code'])
-                                with ic[2]:
-                                    st.text(desc_text)
-                                with ic[3]:
-                                    st.text(cd_display)
-                                with ic[4]:
-                                    if st.button("Use", key=f"txt_{item['code']}"):
-                                        fetched = _fetch_hs_data_all_sources(item['code'])
-                                        st.session_state.last_search_result = fetched
-                                        st.rerun()
+                                    with st.spinner(f"Loading HS codes for '{hs_input}'..."):
+                                        for ch in kw_chapters:
+                                            ch_subcodes = _get_subcodes(ch, limit=50)
+                                            for sc in ch_subcodes:
+                                                if sc['code'] not in seen_codes:
+                                                    seen_codes.add(sc['code'])
+                                                    all_text_matches.append(sc)
 
-                # Favorite star button
-                if (MODULE_STATUS.get("favorites_manager")
-                        and st.session_state.last_search_result
-                        and st.session_state.last_search_result.get('status') == 'success'):
-                    sr = st.session_state.last_search_result
-                    if st.button("Add to Favorites", key="fav_from_search"):
-                        fm = st.session_state.favorites_mgr
-                        fm.add(
-                            hs_code=sr.get('hs_code', hs_input),
-                            description=sr.get('description', '') or '',
-                            customs_duty_rate=sr.get('customs_duty'),
-                            sales_tax_rate=sr.get('sales_tax'),
-                            income_tax_rate=sr.get('income_tax'),
-                            unit_of_measure=sr.get('unit_of_measure', 'kg'),
-                        )
-                        st.success("Added to favorites!")
+                            # 4. Score each result by match strength, sort best first
+                            if all_text_matches:
+                                for m in all_text_matches:
+                                    m['_score'] = _match_strength(hs_input, m.get('description', ''))
+                                all_text_matches.sort(key=lambda x: x['_score'], reverse=True)
 
-                if (st.session_state.last_search_result
-                        and st.session_state.last_search_result.get('status') == 'success'):
-                    if st.button("Use in Duty Calculator", type="secondary", use_container_width=True):
-                        st.session_state.prefill_data = st.session_state.last_search_result
-                        st.info("Data saved! Switch to Import Calculator tab.")
+                                st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
+
+                                hdr = st.columns([1, 2, 5, 1, 1])
+                                with hdr[0]:
+                                    st.markdown("**Match**")
+                                with hdr[1]:
+                                    st.markdown("**HS Code**")
+                                with hdr[2]:
+                                    st.markdown("**Description**")
+                                with hdr[3]:
+                                    st.markdown("**CD %**")
+                                with hdr[4]:
+                                    st.markdown("")
+
+                                for item in all_text_matches:
+                                    score = item.get('_score', 0)
+                                    color = _strength_color(score)
+                                    cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
+                                    desc_text = (item.get('description') or '—')[:70]
+                                    ic = st.columns([1, 2, 5, 1, 1])
+                                    with ic[0]:
+                                        st.markdown(
+                                            f'<span style="color:{color};font-weight:bold">{score}%</span>',
+                                            unsafe_allow_html=True,
+                                        )
+                                    with ic[1]:
+                                        st.text(item['code'])
+                                    with ic[2]:
+                                        st.text(desc_text)
+                                    with ic[3]:
+                                        st.text(cd_display)
+                                    with ic[4]:
+                                        if st.button("Use", key=f"txt_{item['code']}"):
+                                            fetched = _fetch_hs_data_all_sources(item['code'])
+                                            st.session_state.last_search_result = fetched
+                                            st.rerun()
+
+        # Favorite star button (works for both search modes)
+        if (MODULE_STATUS.get("favorites_manager")
+                and st.session_state.last_search_result
+                and st.session_state.last_search_result.get('status') == 'success'):
+            sr = st.session_state.last_search_result
+            if st.button("Add to Favorites", key="fav_from_search"):
+                fm = st.session_state.favorites_mgr
+                fm.add(
+                    hs_code=sr.get('hs_code', hs_input),
+                    description=sr.get('description', '') or '',
+                    customs_duty_rate=sr.get('customs_duty'),
+                    sales_tax_rate=sr.get('sales_tax'),
+                    income_tax_rate=sr.get('income_tax'),
+                    unit_of_measure=sr.get('unit_of_measure', 'kg'),
+                )
+                st.success("Added to favorites!")
+
+        if (st.session_state.last_search_result
+                and st.session_state.last_search_result.get('status') == 'success'):
+            if st.button("Use in Duty Calculator", type="secondary", use_container_width=True):
+                st.session_state.prefill_data = st.session_state.last_search_result
+                st.info("Data saved! Switch to Import Calculator tab.")
 
 
 # ===== TAB 2: Import Calculator =====
