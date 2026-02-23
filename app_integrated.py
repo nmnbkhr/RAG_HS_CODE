@@ -391,6 +391,18 @@ HS_KEYWORD_CHAPTERS = {
     "battery": ["85"], "cable": ["85"], "wire": ["72", "73", "74", "76"],
     "pipe": ["73"], "tube": ["73"], "bolt": ["73"], "screw": ["73"], "nail": ["73"],
     "tyre": ["40"], "tire": ["40"],
+    # Clothing & apparel (Ch. 61 knitted, Ch. 62 woven, Ch. 63 other textiles)
+    "shirt": ["61", "62"], "t-shirt": ["61"], "tshirt": ["61"], "tee": ["61"],
+    "trouser": ["61", "62"], "pant": ["61", "62"], "jean": ["62"], "denim": ["62"],
+    "jacket": ["61", "62"], "coat": ["61", "62"], "sweater": ["61"], "hoodie": ["61"],
+    "dress": ["61", "62"], "skirt": ["61", "62"], "blouse": ["62"],
+    "underwear": ["61", "62"], "sock": ["61"], "stocking": ["61"],
+    "scarf": ["61", "62"], "shawl": ["62"], "tie": ["62"], "necktie": ["62"],
+    "glove": ["61", "62"], "hat": ["65"], "cap": ["65"], "headgear": ["65"],
+    "garment": ["61", "62"], "apparel": ["61", "62"], "clothing": ["61", "62"],
+    "uniform": ["61", "62"], "sportswear": ["61", "62"],
+    "blanket": ["63"], "bedsheet": ["63"], "towel": ["63"], "curtain": ["63"],
+    "bag": ["42", "63"], "suitcase": ["42"], "handbag": ["42"],
 }
 
 
@@ -475,16 +487,35 @@ def _strength_color(score: int) -> str:
 def _get_chapters_for_keyword(keyword: str) -> list:
     """
     Get matching chapter codes for a keyword. Priority order:
+    0. Multi-word: try full phrase, hyphenated, and each word separately
     1. Exact match (iron → iron)
     2. Depluralized stem (apples → apple)
     3. Substring containment (medicines contains medicine)
-    4. Phonetic match confirmed by fuzzy ≥ 80%
+    4. Phonetic match confirmed by fuzzy ≥ 70%
     5. Pure fuzzy ≥ 90% (catches typos that change phonetic codes)
     Returns list of 2-digit chapter strings.
     """
     keyword_lower = keyword.strip().lower()
     if not keyword_lower:
         return []
+
+    # --- Tier 0: Multi-word handling ---
+    # "tee shirt" → try "tee shirt", "tee-shirt", "teeshirt", then "tee" and "shirt" individually
+    words = keyword_lower.split()
+    if len(words) > 1:
+        # Try joined variants: "tee shirt" → "tee-shirt", "teeshirt"
+        hyphenated = "-".join(words)
+        joined = "".join(words)
+        for variant in [keyword_lower, hyphenated, joined]:
+            if variant in HS_KEYWORD_CHAPTERS:
+                return HS_KEYWORD_CHAPTERS[variant]
+        # Try each word individually, merge chapters
+        all_chapters = set()
+        for w in words:
+            chs = _get_chapters_for_keyword(w)  # recursive single-word lookup
+            all_chapters.update(chs)
+        if all_chapters:
+            return sorted(all_chapters)
 
     # --- Tier 1: Exact match ---
     if keyword_lower in HS_KEYWORD_CHAPTERS:
@@ -2249,28 +2280,35 @@ with tabs[tab_idx]:
                         all_text_matches = []
                         seen_codes = set()
 
-                        # 1. Show chapter banner for known keywords
-                        kw_chapters = _get_chapters_for_keyword(hs_input)
-                        if kw_chapters:
-                            ch_labels = ", ".join(
-                                f"Chapter {ch} ({HS_CHAPTERS.get(ch, '')})" for ch in kw_chapters
-                            )
-                            st.markdown(
-                                f'<div class="info-box"><b>Related Chapters:</b> {ch_labels}</div>',
-                                unsafe_allow_html=True,
-                            )
+                        # 1. PRIMARY: Search vectorstore/PCT descriptions directly
+                        #    This searches the actual tariff PDF data — no manual mapping needed
+                        try:
+                            vs = st.session_state.get('vectorstore')
+                            if vs:
+                                docs = vs.similarity_search(hs_input, k=20)
+                                code_pattern = re.compile(r'\b(\d{4}\.\d{4})\b')
+                                for doc in docs:
+                                    text = doc.page_content
+                                    codes_in_doc = code_pattern.findall(text)
+                                    for code in codes_in_doc:
+                                        if code not in seen_codes:
+                                            seen_codes.add(code)
+                                            # Extract description near the code
+                                            idx = text.find(code)
+                                            nearby = text[idx:idx+200] if idx >= 0 else ""
+                                            desc_m = re.search(
+                                                r'\d{4}\.\d{4}\s*[\|:\-–]?\s*(.+?)(?:\n|\d{4}\.\d{4}|$)',
+                                                nearby
+                                            )
+                                            desc = desc_m.group(1).strip()[:80] if desc_m else ""
+                                            all_text_matches.append({
+                                                'code': code, 'description': desc,
+                                                'unit': _detect_unit(desc), 'customs_duty': None
+                                            })
+                        except Exception:
+                            pass
 
-                        # 2. Load sub-codes from all sources (WEBOC cache, TIPP, RAG)
-                        if kw_chapters:
-                            with st.spinner(f"Loading HS codes for '{hs_input}'..."):
-                                for ch in kw_chapters:
-                                    ch_subcodes = _get_subcodes(ch, limit=50)
-                                    for sc in ch_subcodes:
-                                        if sc['code'] not in seen_codes:
-                                            seen_codes.add(sc['code'])
-                                            all_text_matches.append(sc)
-
-                        # 3. Also search WEBOC descriptions for the keyword
+                        # 2. WEBOC description search (if cache loaded)
                         try:
                             weboc_matches = st.session_state.weboc_scraper.search_hs_codes_autocomplete(hs_input, limit=50)
                             for m in weboc_matches:
@@ -2282,6 +2320,25 @@ with tabs[tab_idx]:
                                     })
                         except Exception:
                             pass
+
+                        # 3. FALLBACK: Keyword chapter mapping + sub-codes (when above sources find little)
+                        if len(all_text_matches) < 5:
+                            kw_chapters = _get_chapters_for_keyword(hs_input)
+                            if kw_chapters:
+                                ch_labels = ", ".join(
+                                    f"Chapter {ch} ({HS_CHAPTERS.get(ch, '')})" for ch in kw_chapters
+                                )
+                                st.markdown(
+                                    f'<div class="info-box"><b>Related Chapters:</b> {ch_labels}</div>',
+                                    unsafe_allow_html=True,
+                                )
+                                with st.spinner(f"Loading HS codes for '{hs_input}'..."):
+                                    for ch in kw_chapters:
+                                        ch_subcodes = _get_subcodes(ch, limit=50)
+                                        for sc in ch_subcodes:
+                                            if sc['code'] not in seen_codes:
+                                                seen_codes.add(sc['code'])
+                                                all_text_matches.append(sc)
 
                         # 4. Score each result by match strength, sort best → worst
                         if all_text_matches:
