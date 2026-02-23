@@ -17,6 +17,7 @@ import re
 import sys
 import shutil
 import io
+import json
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -796,6 +797,82 @@ def _detect_unit(text: str) -> str:
     return "units"
 
 
+PERSIST_BASE = "/mnt/e/raghscode"
+
+
+def _persist_hs_definition(data: dict, country: str = "Pakistan"):
+    """
+    Save an HS code tariff definition to disk.
+    Path: /mnt/e/raghscode/{country}/{YYYY-MM-DD}_{hs_code}.json
+    Silently skips if the disk path is unavailable.
+    """
+    try:
+        hs_code = data.get("hs_code", "unknown").replace(".", "")
+        today = datetime.now().strftime("%Y-%m-%d")
+        country_clean = re.sub(r'[^\w\s-]', '', country.strip()).replace(" ", "_") or "Pakistan"
+
+        folder = os.path.join(PERSIST_BASE, country_clean)
+        os.makedirs(folder, exist_ok=True)
+
+        filename = f"{today}_{hs_code}.json"
+        filepath = os.path.join(folder, filename)
+
+        record = {
+            "hs_code": data.get("hs_code", ""),
+            "description": data.get("description", ""),
+            "customs_duty_pct": data.get("customs_duty", 0),
+            "sales_tax_pct": data.get("sales_tax", 0),
+            "income_tax_pct": data.get("income_tax", 0),
+            "additional_duty_pct": data.get("additional_duty", 0),
+            "regulatory_duty_pct": data.get("regulatory_duty", 0),
+            "federal_excise_duty_pct": data.get("federal_excise_duty", 0),
+            "unit_of_measure": data.get("unit_of_measure", "units"),
+            "source": data.get("source", "unknown"),
+            "country": country,
+            "fetched_at": datetime.now().isoformat(),
+            "sro_references": data.get("sro_references", []),
+        }
+
+        # If file already exists for today, update it (latest data wins)
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump(record, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass  # Disk unavailable or permission error — don't break the app
+
+
+def _persist_subcodes(subcodes: list, prefix: str, country: str = "Pakistan"):
+    """Save a batch of sub-codes under a chapter/heading to disk."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d")
+        country_clean = re.sub(r'[^\w\s-]', '', country.strip()).replace(" ", "_") or "Pakistan"
+        folder = os.path.join(PERSIST_BASE, country_clean)
+        os.makedirs(folder, exist_ok=True)
+
+        filename = f"{today}_chapter_{prefix}.json"
+        filepath = os.path.join(folder, filename)
+
+        records = []
+        for sc in subcodes:
+            records.append({
+                "hs_code": sc.get("code", ""),
+                "description": sc.get("description", ""),
+                "customs_duty_pct": sc.get("customs_duty"),
+                "unit_of_measure": sc.get("unit", "units"),
+            })
+
+        with open(filepath, "w", encoding="utf-8") as f:
+            json.dump({
+                "prefix": prefix,
+                "chapter_name": HS_CHAPTERS.get(prefix[:2], ""),
+                "country": country,
+                "fetched_at": datetime.now().isoformat(),
+                "count": len(records),
+                "codes": records,
+            }, f, indent=2, ensure_ascii=False)
+    except Exception:
+        pass
+
+
 def _get_subcodes(prefix: str, limit: int = 50) -> list:
     """
     Get all sub-codes under a prefix from WEBOC cache and TIPP cache.
@@ -921,13 +998,17 @@ def _get_subcodes(prefix: str, limit: int = 50) -> list:
             pass
 
     results.sort(key=lambda x: x['code'])
-    return results[:limit]
+    final = results[:limit]
+    if final:
+        _persist_subcodes(final, prefix)
+    return final
 
 
-def _fetch_hs_data_all_sources(hs_code: str) -> dict:
+def _fetch_hs_data_all_sources(hs_code: str, country: str = "Pakistan") -> dict:
     """
     Fetch HS code data from all available sources (orchestrator → WEBOC → TIPP → RAG).
     Returns a unified dict with status, duty rates, description, unit, and source.
+    Persists successful results to /mnt/e/raghscode/{country}/.
     """
     hs_code = hs_code.strip()
     if not hs_code:
@@ -966,6 +1047,7 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
                         result["best_preferential_rate"] = compliance["best_preferential_rate"]
                 except Exception:
                     pass
+                _persist_hs_definition(result, country)
                 return result
         except Exception:
             pass
@@ -1000,6 +1082,7 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
             # Detect unit from description if still missing
             if weboc_result.get("description") and (not weboc_result.get("unit_of_measure") or weboc_result["unit_of_measure"] == "units"):
                 weboc_result["unit_of_measure"] = _detect_unit(weboc_result["description"])
+            _persist_hs_definition(weboc_result, country)
             return weboc_result
     except Exception:
         pass
@@ -1012,7 +1095,7 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
             if tipp_result:
                 desc = tipp_result.description or ""
                 unit = getattr(tipp_result, 'unit_of_measure', '') or _detect_unit(desc)
-                return {
+                tipp_data = {
                     "hs_code": hs_code,
                     "status": "success",
                     "customs_duty": tipp_result.mfn_cd_rate,
@@ -1024,6 +1107,8 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
                     "unit_of_measure": unit,
                     "source": "TIPP",
                 }
+                _persist_hs_definition(tipp_data, country)
+                return tipp_data
         except Exception:
             pass
 
@@ -1038,7 +1123,7 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
             st_match = re.search(r'Sales\s+Tax.*?(\d+(?:\.\d+)?)\s*%', qa_result, re.IGNORECASE)
             it_match = re.search(r'(?:Income|Advance)\s+Tax.*?(\d+(?:\.\d+)?)\s*%', qa_result, re.IGNORECASE)
             desc_text = desc_match.group(1).strip() if desc_match else ""
-            return {
+            rag_data = {
                 "hs_code": hs_code,
                 "status": "success",
                 "customs_duty": float(cd_match.group(1)) if cd_match else 0,
@@ -1050,6 +1135,8 @@ def _fetch_hs_data_all_sources(hs_code: str) -> dict:
                 "unit_of_measure": _detect_unit(desc_text) if desc_text else _detect_unit(qa_result),
                 "source": "PCT Tariff Database",
             }
+            _persist_hs_definition(rag_data, country)
+            return rag_data
     except Exception:
         pass
 
