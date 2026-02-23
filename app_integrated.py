@@ -422,18 +422,19 @@ def _phonetic_keys(word: str) -> set:
 
 def _get_chapters_for_keyword(keyword: str) -> list:
     """
-    Get matching chapter codes for a keyword using 4-tier matching:
-    1. Direct exact match
-    2. Depluralized stem match
-    3. Substring / partial match
-    4. Phonetic (Soundex + Metaphone) + fuzzy (edit distance) match
+    Get matching chapter codes for a keyword. Priority order:
+    1. Exact match (iron → iron)
+    2. Depluralized stem (apples → apple)
+    3. Substring containment (medicines contains medicine)
+    4. Phonetic + fuzzy combined — only if BOTH phonetic codes match
+       AND fuzzy score ≥ 85% (prevents false positives)
     Returns list of 2-digit chapter strings.
     """
     keyword_lower = keyword.strip().lower()
     if not keyword_lower:
         return []
 
-    # --- Tier 1: Direct match ---
+    # --- Tier 1: Exact match ---
     if keyword_lower in HS_KEYWORD_CHAPTERS:
         return HS_KEYWORD_CHAPTERS[keyword_lower]
 
@@ -452,32 +453,29 @@ def _get_chapters_for_keyword(keyword: str) -> list:
     if partial_matches:
         return sorted(partial_matches)
 
-    # --- Tier 4: Phonetic + Fuzzy matching ---
-    # 4a. Phonetic: compare Soundex/Metaphone codes
+    # --- Tier 4: Phonetic + Fuzzy (strict) ---
+    # Require BOTH a phonetic match AND a high fuzzy score to avoid false positives.
+    # Soundex alone groups too many unrelated words (e.g. "lead" vs "lid").
     input_phonetics = set()
     for stem in stems:
         input_phonetics.update(_phonetic_keys(stem))
 
-    phonetic_matches = set()
-    for key, chapters in HS_KEYWORD_CHAPTERS.items():
-        key_phonetics = _phonetic_keys(key)
-        if input_phonetics & key_phonetics:  # any phonetic code in common
-            phonetic_matches.update(chapters)
-
-    if phonetic_matches:
-        return sorted(phonetic_matches)
-
-    # 4b. Fuzzy: edit-distance ratio (catches typos like "iren"→"iron", "aples"→"apple")
     best_score = 0
     best_chapters = []
     for key, chapters in HS_KEYWORD_CHAPTERS.items():
+        key_phonetics = _phonetic_keys(key)
+        # Must share at least one phonetic code
+        if not (input_phonetics & key_phonetics):
+            continue
+        # Among phonetic matches, pick the one with highest fuzzy score
         for stem in stems:
             score = rfuzz.ratio(stem, key)
             if score > best_score:
                 best_score = score
                 best_chapters = chapters
-    # Only accept fuzzy matches above 75% similarity
-    if best_score >= 75:
+
+    # Only accept if fuzzy confirms ≥ 85% similarity
+    if best_score >= 85:
         return best_chapters
 
     return []
@@ -673,22 +671,26 @@ class WEBOCTariffScraper:
                     results.append(item)
                     if len(results) >= limit:
                         break
-            # 2. If text search found few results, try fuzzy matching on descriptions
-            if is_text and len(results) < limit:
-                seen = {r['code'] for r in results}
-                query_words = set(query_clean.split())
+            # 2. Only if exact substring found NOTHING, try fuzzy on descriptions
+            if is_text and not results:
+                seen = set()
                 fuzzy_scored = []
                 for item in self.hs_code_cache:
-                    if item['code'] in seen:
-                        continue
                     desc = item['description'].lower()
-                    # Token-set ratio handles word order and partial overlap
-                    score = rfuzz.token_set_ratio(query_clean, desc)
-                    if score >= 70:
-                        fuzzy_scored.append((score, item))
+                    # Use plain ratio (not token_set) to avoid loose matches on long descriptions
+                    # Compare query against individual words in description for tighter matching
+                    desc_words = desc.split()
+                    best_word_score = max(
+                        (rfuzz.ratio(query_clean, w) for w in desc_words),
+                        default=0
+                    )
+                    if best_word_score >= 85:
+                        fuzzy_scored.append((best_word_score, item))
                 fuzzy_scored.sort(key=lambda x: x[0], reverse=True)
-                for _score, item in fuzzy_scored[:limit - len(results)]:
-                    results.append(item)
+                for _score, item in fuzzy_scored[:limit]:
+                    if item['code'] not in seen:
+                        seen.add(item['code'])
+                        results.append(item)
             return results
         return self.fetch_hs_code_list(query)[:limit]
 
