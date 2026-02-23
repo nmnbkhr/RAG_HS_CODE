@@ -565,7 +565,15 @@ class WEBOCTariffScraper:
                     result['regulatory_duty'] = value
         return result
 
+    def _ensure_cache_loaded(self):
+        """Load full HS code list from WEBOC into cache on first call."""
+        if not self.hs_code_cache:
+            all_codes = self.fetch_hs_code_list("")
+            if all_codes:
+                self.hs_code_cache = all_codes
+
     def search_hs_codes_autocomplete(self, query: str, limit: int = 50) -> list:
+        self._ensure_cache_loaded()
         if self.hs_code_cache:
             query_clean = query.replace('.', '').lower()
             results = []
@@ -813,7 +821,24 @@ def _get_subcodes(prefix: str, limit: int = 50) -> list:
     except Exception:
         pass
 
-    # 2. Enrich from TIPP cache (has duty rates)
+    # 2. If cache missed, try fetching directly from WEBOC with prefix filter
+    if not results:
+        try:
+            weboc = st.session_state.get('weboc_scraper')
+            if weboc:
+                direct = weboc.fetch_hs_code_list(prefix_clean)
+                for m in direct:
+                    code = m.get('code', '')
+                    if code not in seen:
+                        seen.add(code)
+                        results.append({
+                            'code': code, 'description': m.get('description', ''),
+                            'unit': m.get('unit', 'units'), 'customs_duty': None
+                        })
+        except Exception:
+            pass
+
+    # 3. Enrich from TIPP cache (has duty rates)
     if MODULE_STATUS.get("tipp_scraper"):
         try:
             cache_path = os.path.join(os.path.dirname(__file__), "tipp_cache.db")
@@ -833,6 +858,20 @@ def _get_subcodes(prefix: str, limit: int = 50) -> list:
                                 r['customs_duty'] = tr.mfn_cd_rate
                                 if not r['description']:
                                     r['description'] = tr.description
+        except Exception:
+            pass
+
+    # 4. If still nothing, try TIPP scraper live for a few headings under the prefix
+    if not results and MODULE_STATUS.get("tipp_scraper"):
+        try:
+            scraper = TIPPScraper()
+            tipp_result = scraper.search(prefix_clean)
+            if tipp_result:
+                results.append({
+                    'code': tipp_result.hs_code, 'description': tipp_result.description,
+                    'unit': getattr(tipp_result, 'unit_of_measure', 'units'),
+                    'customs_duty': tipp_result.mfn_cd_rate
+                })
         except Exception:
             pass
 
