@@ -2593,27 +2593,68 @@ with tabs[tab_idx]:
                                             st.session_state.last_search_result = fetched
                                             st.rerun()
 
-        # Favorite star button (works for both search modes)
-        if (MODULE_STATUS.get("favorites_manager")
-                and st.session_state.last_search_result
-                and st.session_state.last_search_result.get('status') == 'success'):
-            sr = st.session_state.last_search_result
-            if st.button("Add to Favorites", key="fav_from_search"):
-                fm = st.session_state.favorites_mgr
-                fm.add(
-                    hs_code=sr.get('hs_code', hs_input),
-                    description=sr.get('description', '') or '',
-                    customs_duty_rate=sr.get('customs_duty'),
-                    sales_tax_rate=sr.get('sales_tax'),
-                    income_tax_rate=sr.get('income_tax'),
-                    unit_of_measure=sr.get('unit_of_measure', 'kg'),
-                )
-                st.success("Added to favorites!")
+    # --- Display fetched rate data (shown on rerun after Lookup Full Rates / Select) ---
+    if (st.session_state.last_search_result
+            and st.session_state.last_search_result.get('status') == 'success'):
+        sr = st.session_state.last_search_result
+        _sr_code = sr.get('hs_code', '')
+        _sr_desc = sr.get('description', '') or ''
+        _sr_cd = sr.get('customs_duty')
+        _sr_st = sr.get('sales_tax')
+        _sr_it = sr.get('income_tax')
+        _sr_ad = sr.get('additional_duty')
+        _sr_rd = sr.get('regulatory_duty')
+        _sr_fed = sr.get('federal_excise_duty')
+        _sr_unit = sr.get('unit_of_measure', '')
+        _sr_source = sr.get('source', '')
 
-        if (st.session_state.last_search_result
-                and st.session_state.last_search_result.get('status') == 'success'):
+        st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+        st.markdown(f'''
+        <div style="background:#E8F5E9;border-left:4px solid #1B5E20;padding:16px;border-radius:8px;margin-bottom:12px">
+            <div style="font-size:13px;color:#666;margin-bottom:4px">Fetched Rates — {_sr_source}</div>
+            <div style="font-size:22px;font-weight:bold;color:#1B5E20;margin-bottom:6px">{_sr_code}</div>
+            <div style="font-size:15px;color:#333;margin-bottom:10px">{_sr_desc[:120]}</div>
+            <div style="display:flex;flex-wrap:wrap;gap:12px">
+                <span style="background:#1B5E20;color:white;padding:4px 12px;border-radius:4px">CD: {_sr_cd}%</span>
+                <span style="background:#2E7D32;color:white;padding:4px 12px;border-radius:4px">ST: {_sr_st}%</span>
+                <span style="background:#388E3C;color:white;padding:4px 12px;border-radius:4px">IT: {_sr_it}%</span>
+                {"<span style='background:#5D4037;color:white;padding:4px 12px;border-radius:4px'>AD: " + str(_sr_ad) + "%</span>" if _sr_ad else ""}
+                {"<span style='background:#E65100;color:white;padding:4px 12px;border-radius:4px'>RD: " + str(_sr_rd) + "%</span>" if _sr_rd else ""}
+                {"<span style='background:#6A1B9A;color:white;padding:4px 12px;border-radius:4px'>FED: " + str(_sr_fed) + "%</span>" if _sr_fed else ""}
+            </div>
+            {"<div style='margin-top:8px;font-size:13px;color:#555'>Unit: " + _sr_unit + "</div>" if _sr_unit else ""}
+        </div>''', unsafe_allow_html=True)
+
+        # SRO references if available
+        _sro_refs = sr.get('sro_references', [])
+        if _sro_refs:
+            with st.expander(f"SRO References ({len(_sro_refs)})"):
+                for sro in _sro_refs:
+                    st.caption(sro if isinstance(sro, str) else str(sro))
+
+        # Preferential rate
+        _pref = sr.get('best_preferential_rate')
+        if _pref is not None:
+            st.info(f"Best preferential rate (FTA/PTA): {_pref}%")
+
+        # Action buttons
+        fav_col, calc_col = st.columns(2)
+        with fav_col:
+            if (MODULE_STATUS.get("favorites_manager")):
+                if st.button("Add to Favorites", key="fav_from_search"):
+                    fm = st.session_state.favorites_mgr
+                    fm.add(
+                        hs_code=sr.get('hs_code', ''),
+                        description=_sr_desc,
+                        customs_duty_rate=_sr_cd,
+                        sales_tax_rate=_sr_st,
+                        income_tax_rate=_sr_it,
+                        unit_of_measure=_sr_unit,
+                    )
+                    st.success("Added to favorites!")
+        with calc_col:
             if st.button("Use in Duty Calculator", type="secondary", use_container_width=True):
-                st.session_state.prefill_data = st.session_state.last_search_result
+                st.session_state.prefill_data = sr
                 st.info("Data saved! Switch to Import Calculator tab.")
 
 
