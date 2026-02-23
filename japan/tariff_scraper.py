@@ -148,6 +148,20 @@ KEYWORD_SYNONYMS = {
     'carpet': ['rug', '57'],
     'front wheel drive': ['motor car', 'vehicle', '8703'],
     'seater': ['persons', 'passenger', '8702', '8703'],
+    'petrol': ['gasoline', 'spark-ignition', 'internal combustion', '8703.2'],
+    'diesel': ['compression-ignition', 'internal combustion', '8703.3'],
+    'gasoline': ['petrol', 'spark-ignition', '8703.2'],
+    'fwd': ['motor car', 'vehicle', 'passenger', '8703'],
+    'awd': ['motor car', 'vehicle', '8703'],
+    'rwd': ['motor car', 'vehicle', '8703'],
+    'sedan': ['motor car', 'vehicle', 'passenger', '8703'],
+    'suv': ['motor car', 'vehicle', 'passenger', '8703'],
+    'hatchback': ['motor car', 'vehicle', 'passenger', '8703'],
+    'coupe': ['motor car', 'vehicle', 'passenger', '8703'],
+    'wagon': ['motor car', 'vehicle', '8703'],
+    'wheel': ['vehicle'],
+    'cylinder': ['engine', 'piston', '8703'],
+    'cc': ['cylinder capacity', '8703'],
 }
 
 
@@ -514,13 +528,20 @@ class JapanTariffScraper:
         _vehicle_words = {
             'car', 'ev', 'vehicle', 'automobile', 'truck', 'bus',
             'motorcycle', 'hybrid', 'phev', 'sedan', 'suv', 'van',
-            'tractor', 'motor car',
+            'tractor', 'motor car', 'petrol', 'diesel', 'gasoline',
+            'fwd', 'awd', 'rwd', 'hatchback', 'coupe', 'wagon',
         }
         is_vehicle_query = bool(set(tokens) & _vehicle_words)
 
         # Detect EV / electric / hybrid intent
         _ev_words = {'ev', 'electric', 'hybrid', 'phev', 'bev', 'plugin'}
         is_ev_query = bool(set(tokens) & _ev_words)
+
+        # Detect petrol (spark-ignition) / diesel (compression-ignition) intent
+        _petrol_words = {'petrol', 'gasoline'}
+        _diesel_words = {'diesel'}
+        is_petrol_query = bool(set(tokens) & _petrol_words)
+        is_diesel_query = bool(set(tokens) & _diesel_words)
 
         # Pre-compute heading matches: which 4-digit headings match expanded tokens
         heading_matches: set[str] = set()  # e.g. {"8703", "8702"}
@@ -591,6 +612,22 @@ class JapanTariffScraper:
                         and entry_heading not in ('8703', '8702', '8704')):
                     score -= 10
 
+            # --- Petrol / Diesel fuel-type bonus ---
+            if is_petrol_query or is_diesel_query:
+                sub = code[5:7] if len(code) > 6 else ''
+                if is_petrol_query:
+                    # 8703.21-24 are spark-ignition (petrol/gasoline) cars
+                    if entry_heading == '8703' and sub in ('21', '22', '23', '24'):
+                        score += 25
+                    elif 'spark-ignition' in desc_en and 'electric motor' not in desc_en:
+                        score += 15
+                if is_diesel_query:
+                    # 8703.31-33 are compression-ignition (diesel) cars
+                    if entry_heading == '8703' and sub in ('31', '32', '33'):
+                        score += 25
+                    elif 'compression-ignition' in desc_en and 'electric motor' not in desc_en:
+                        score += 15
+
             # --- Child-row penalty (sub-item like "- Used", "- Other") ---
             raw_desc = entry.get('desc_en', '')
             if raw_desc.startswith(('- ', '-- ')):
@@ -600,13 +637,41 @@ class JapanTariffScraper:
             scored[code] = (max(old_score, score), entry)
 
         # Also match by expanded HS code prefixes from synonyms
+        # Apply heading/vehicle/fuel bonuses so code-only matches rank properly
         for prefix in expanded_codes:
             prefix_digits = prefix.replace('.', '')
             for code, entry in self.data.items():
                 code_digits = re.sub(r'[^0-9]', '', code)
                 if code_digits.startswith(prefix_digits):
+                    base = 50
+                    entry_heading = code[:4]
+
+                    # Heading context bonus
+                    if entry_heading in heading_matches:
+                        base += 25
+
+                    # Vehicle-query bonus
+                    if is_vehicle_query and code[:2] == '87':
+                        if entry_heading in (
+                            '8701', '8702', '8703', '8704', '8705',
+                        ):
+                            base += 20
+
+                    # Petrol/diesel fuel-type bonus
+                    sub = code[5:7] if len(code) > 6 else ''
+                    if is_petrol_query:
+                        if entry_heading == '8703' and sub in (
+                            '21', '22', '23', '24',
+                        ):
+                            base += 25
+                    if is_diesel_query:
+                        if entry_heading == '8703' and sub in (
+                            '31', '32', '33',
+                        ):
+                            base += 25
+
                     old_score = scored.get(code, (0, entry))[0]
-                    scored[code] = (max(old_score, 50), entry)
+                    scored[code] = (max(old_score, base), entry)
 
         # Sort by score descending, then by code
         ranked = sorted(

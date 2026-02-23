@@ -131,6 +131,19 @@ STRINGS = {
         'error_invalid_hs': 'Invalid HS code format.',
         'error_no_rates': 'No rate data available for this code.',
 
+        # AI Search
+        'ai_search_title': 'AI Search',
+        'ai_search_toggle': 'AI-Powered Search',
+        'ai_search_help': 'Uses GPT-4o-mini to understand your query and find the best HS codes',
+        'ai_search_hint': 'LLM translates your query into HS classification terms',
+        'ai_search_unavailable': 'Set OPENAI_API_KEY in .env to enable AI search',
+        'ai_understanding': 'AI Understanding',
+        'ai_search_terms': 'Search terms',
+        'ai_headings': 'HS Headings',
+        'ai_confidence': 'Confidence',
+        'ai_fallback': 'AI search unavailable: {}. Falling back to keyword search.',
+        'ai_analyzing': 'AI is analyzing your query...',
+
         # Footer
         'footer_title': 'Japan Customs \u2014 HS Code & Import Duty Calculator',
         'footer_formula': 'Import: CIF Basis | Customs Duty + Excise + Consumption Tax (10%/8%)',
@@ -271,6 +284,19 @@ STRINGS = {
         'error_fetch_failed': '\u95a2\u7a0e\u30c7\u30fc\u30bf\u306e\u53d6\u5f97\u306b\u5931\u6557\u3057\u307e\u3057\u305f\u3002',
         'error_invalid_hs': 'HS\u30b3\u30fc\u30c9\u306e\u5f62\u5f0f\u304c\u7121\u52b9\u3067\u3059\u3002',
         'error_no_rates': '\u3053\u306e\u30b3\u30fc\u30c9\u306e\u7a0e\u7387\u30c7\u30fc\u30bf\u304c\u3042\u308a\u307e\u305b\u3093\u3002',
+
+        # AI Search
+        'ai_search_title': 'AI\u691c\u7d22',
+        'ai_search_toggle': 'AI\u691c\u7d22',
+        'ai_search_help': 'GPT-4o-mini\u304c\u30af\u30a8\u30ea\u3092\u7406\u89e3\u3057\u3001\u6700\u9069\u306aHS\u30b3\u30fc\u30c9\u3092\u691c\u7d22\u3057\u307e\u3059',
+        'ai_search_hint': 'LLM\u304c\u30af\u30a8\u30ea\u3092HS\u5206\u985e\u7528\u8a9e\u306b\u5909\u63db\u3057\u307e\u3059',
+        'ai_search_unavailable': 'AI\u691c\u7d22\u3092\u6709\u52b9\u306b\u3059\u308b\u306b\u306f.env\u306bOPENAI_API_KEY\u3092\u8a2d\u5b9a\u3057\u3066\u304f\u3060\u3055\u3044',
+        'ai_understanding': 'AI\u306e\u7406\u89e3',
+        'ai_search_terms': '\u691c\u7d22\u7528\u8a9e',
+        'ai_headings': 'HS\u898b\u51fa\u3057',
+        'ai_confidence': '\u4fe1\u983c\u5ea6',
+        'ai_fallback': 'AI\u691c\u7d22\u304c\u5229\u7528\u3067\u304d\u307e\u305b\u3093: {}\u3002\u30ad\u30fc\u30ef\u30fc\u30c9\u691c\u7d22\u306b\u30d5\u30a9\u30fc\u30eb\u30d0\u30c3\u30af\u3057\u307e\u3059\u3002',
+        'ai_analyzing': 'AI\u304c\u30af\u30a8\u30ea\u3092\u5206\u6790\u4e2d...',
 
         # Footer
         'footer_title': '\u65e5\u672c\u7a0e\u95a2 \u2014 HS\u30b3\u30fc\u30c9\u30fb\u8f38\u5165\u95a2\u7a0e\u8a08\u7b97\u6a5f',

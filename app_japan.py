@@ -18,6 +18,13 @@ from japan.exchange_rate import get_customs_fx, get_supported_currencies
 from japan.consumption_tax import get_rate as get_consumption_rate, is_food_item
 from japan.excise_tax import get_excise_info
 
+# LLM search — optional (requires openai package + API key)
+try:
+    from japan.llm_search import llm_search, is_llm_available, LLMClassification
+    _LLM_AVAILABLE = True
+except ImportError:
+    _LLM_AVAILABLE = False
+
 # ---------------------------------------------------------------------------
 # Page Config
 # ---------------------------------------------------------------------------
@@ -322,6 +329,25 @@ with st.sidebar:
         st.warning('No cache. Use "Scrape Chapter" in Lookup tab.')
     st.markdown('</div>', unsafe_allow_html=True)
 
+    # AI Search toggle
+    if _LLM_AVAILABLE:
+        st.markdown(
+            f'<div class="sidebar-card"><h4>{_t("ai_search_title")}</h4>',
+            unsafe_allow_html=True,
+        )
+        if is_llm_available():
+            ai_enabled = st.toggle(
+                _t('ai_search_toggle'),
+                value=False,
+                key='jp_ai_search',
+                help=_t('ai_search_help'),
+            )
+            if ai_enabled:
+                st.caption(_t('ai_search_hint'))
+        else:
+            st.warning(_t('ai_search_unavailable'))
+        st.markdown('</div>', unsafe_allow_html=True)
+
     # About
     st.markdown(f'<div class="sidebar-card"><h4>{_t("sidebar_about_title")}</h4>', unsafe_allow_html=True)
     st.caption(_t('sidebar_about_text'))
@@ -416,10 +442,40 @@ with tab_lookup:
         hs_input_stripped = hs_input.strip()
         lang = st.session_state.jp_lang
 
-        # Smart search handles both HS codes and natural language
-        results = scraper.search(hs_input_stripped, lang=lang)
+        # Route through LLM search or keyword search
+        ai_on = _LLM_AVAILABLE and st.session_state.get('jp_ai_search', False)
+        classification = None
+
+        if ai_on and is_llm_available():
+            with st.spinner(_t('ai_analyzing')):
+                results, classification = llm_search(
+                    hs_input_stripped, scraper, lang=lang,
+                )
+        else:
+            results = scraper.search(hs_input_stripped, lang=lang)
 
         st.markdown('<div class="section-divider"></div>', unsafe_allow_html=True)
+
+        # Show LLM feedback when AI search was used
+        if classification and not classification.error:
+            intent_display = classification.intent_jp if (lang == 'ja' and classification.intent_jp) else classification.intent
+            terms_str = ', '.join(classification.search_terms[:8])
+            codes_str = ', '.join(classification.headings[:5])
+            st.markdown(
+                f'<div class="info-box">'
+                f'<b>{_t("ai_understanding")}:</b> {intent_display}<br>'
+                f'<small>'
+                f'<b>{_t("ai_search_terms")}:</b> {terms_str} &nbsp;|&nbsp; '
+                f'<b>{_t("ai_headings")}:</b> {codes_str} &nbsp;|&nbsp; '
+                f'<b>{_t("ai_confidence")}:</b> {classification.confidence}'
+                f'</small></div>',
+                unsafe_allow_html=True,
+            )
+        elif classification and classification.error:
+            st.markdown(
+                f'<div class="warning-box">{_t("ai_fallback").format(classification.error)}</div>',
+                unsafe_allow_html=True,
+            )
 
         if results:
             st.markdown(f'<div class="success-box"><b>{_t("lookup_results")}</b> \u2014 {len(results)} match(es)</div>', unsafe_allow_html=True)
