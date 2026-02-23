@@ -5,7 +5,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$SCRIPT_DIR"
 
 # Default app file
-APP_FILE="${1:-appuiux.py}"
+APP_FILE="${1:-app_integrated.py}"
 
 # Check if .env exists
 if [ ! -f ".env" ]; then
