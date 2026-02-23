@@ -420,6 +420,58 @@ def _phonetic_keys(word: str) -> set:
     return {k for k in keys if k}
 
 
+def _match_strength(query: str, description: str) -> int:
+    """
+    Score how well a query matches an HS code description (0-100).
+    Combines exact substring, phonetic, and fuzzy matching.
+    """
+    if not query or not description:
+        return 0
+    q = query.strip().lower()
+    desc = description.lower()
+    stems = _depluralize(q)
+    q_phonetics = set()
+    for s in stems:
+        q_phonetics.update(_phonetic_keys(s))
+
+    # Exact substring match in description → highest score
+    for s in stems:
+        if s in desc:
+            # Boost if it matches a whole word
+            words = desc.split()
+            for w in words:
+                if s == w:
+                    return 100  # exact word match
+            return 95  # substring match
+
+    # Per-word scoring: phonetic + fuzzy against each description word
+    desc_words = [w for w in desc.split() if len(w) > 2]
+    best = 0
+    for dw in desc_words:
+        dw_phonetics = _phonetic_keys(dw)
+        phonetic_bonus = 15 if (q_phonetics & dw_phonetics) else 0
+        for s in stems:
+            fz = rfuzz.ratio(s, dw)
+            score = min(fz + phonetic_bonus, 100)
+            if score > best:
+                best = score
+    return int(best)
+
+
+def _strength_color(score: int) -> str:
+    """Return a hex color for match strength: green (strong) → yellow → red (weak)."""
+    if score >= 90:
+        return "#1B5E20"   # dark green — exact/near-exact
+    elif score >= 80:
+        return "#2E7D32"   # green — strong
+    elif score >= 70:
+        return "#F9A825"   # amber — moderate
+    elif score >= 60:
+        return "#E65100"   # orange — weak
+    else:
+        return "#B71C1C"   # red — poor
+
+
 def _get_chapters_for_keyword(keyword: str) -> list:
     """
     Get matching chapter codes for a keyword. Priority order:
@@ -2231,31 +2283,49 @@ with tabs[tab_idx]:
                         except Exception:
                             pass
 
-                        # 4. Display results grouped by chapter
+                        # 4. Score each result by match strength, sort best → worst
                         if all_text_matches:
-                            st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
-                            chapter_groups = {}
                             for m in all_text_matches:
-                                ch = m['code'].replace('.', '')[:2]
-                                ch_name = HS_CHAPTERS.get(ch, "")
-                                key = f"Chapter {ch} — {ch_name}"
-                                chapter_groups.setdefault(key, []).append(m)
-                            for ch_label, items in sorted(chapter_groups.items()):
-                                with st.expander(f"{ch_label} ({len(items)} codes)", expanded=len(chapter_groups) == 1):
-                                    for item in items:
-                                        cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
-                                        ic = st.columns([2, 5, 1, 1])
-                                        with ic[0]:
-                                            st.text(item['code'])
-                                        with ic[1]:
-                                            st.text((item.get('description') or '—')[:70])
-                                        with ic[2]:
-                                            st.text(cd_display)
-                                        with ic[3]:
-                                            if st.button("Use", key=f"txt_{item['code']}"):
-                                                fetched = _fetch_hs_data_all_sources(item['code'])
-                                                st.session_state.last_search_result = fetched
-                                                st.rerun()
+                                m['_score'] = _match_strength(hs_input, m.get('description', ''))
+                            all_text_matches.sort(key=lambda x: x['_score'], reverse=True)
+
+                            st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
+
+                            # Header row
+                            hdr = st.columns([1, 2, 5, 1, 1])
+                            with hdr[0]:
+                                st.markdown("**Match**")
+                            with hdr[1]:
+                                st.markdown("**HS Code**")
+                            with hdr[2]:
+                                st.markdown("**Description**")
+                            with hdr[3]:
+                                st.markdown("**CD %**")
+                            with hdr[4]:
+                                st.markdown("")
+
+                            for item in all_text_matches:
+                                score = item.get('_score', 0)
+                                color = _strength_color(score)
+                                cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
+                                desc_text = (item.get('description') or '—')[:70]
+                                ic = st.columns([1, 2, 5, 1, 1])
+                                with ic[0]:
+                                    st.markdown(
+                                        f'<span style="color:{color};font-weight:bold">{score}%</span>',
+                                        unsafe_allow_html=True,
+                                    )
+                                with ic[1]:
+                                    st.text(item['code'])
+                                with ic[2]:
+                                    st.text(desc_text)
+                                with ic[3]:
+                                    st.text(cd_display)
+                                with ic[4]:
+                                    if st.button("Use", key=f"txt_{item['code']}"):
+                                        fetched = _fetch_hs_data_all_sources(item['code'])
+                                        st.session_state.last_search_result = fetched
+                                        st.rerun()
 
                 # Favorite star button
                 if (MODULE_STATUS.get("favorites_manager")
