@@ -14,12 +14,11 @@ if [ ! -f ".env" ]; then
     exit 1
 fi
 
-# Check if running in conda environment
-if [[ -z "$CONDA_DEFAULT_ENV" ]] || [[ "$CONDA_DEFAULT_ENV" != "rag_hs_code" ]]; then
-    echo "Activating conda environment 'rag_hs_code'..."
-    eval "$(conda shell.bash hook)"
-    conda activate rag_hs_code
-fi
+# Always activate rag_hs_code (deactivate any other env first)
+eval "$(conda shell.bash hook)"
+conda deactivate 2>/dev/null
+conda activate rag_hs_code
 
+echo "Using env: $CONDA_DEFAULT_ENV ($(python --version))"
 echo "Starting Streamlit app: $APP_FILE"
 streamlit run "$APP_FILE" --server.address localhost --server.port 8502
