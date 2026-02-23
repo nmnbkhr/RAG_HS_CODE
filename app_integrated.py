@@ -364,8 +364,17 @@ HS_KEYWORD_CHAPTERS = {
     "machinery": ["84"], "machine": ["84"], "electrical": ["85"], "electronic": ["85"],
     "pharmaceutical": ["30"], "medicine": ["30"], "drug": ["30"],
     "chemical": ["28", "29", "38"], "fertilizer": ["31"], "fertiliser": ["31"],
-    "fruit": ["08"], "vegetable": ["07"], "meat": ["02"], "fish": ["03"],
-    "cereal": ["10"], "rice": ["10"], "wheat": ["10"], "sugar": ["17"],
+    "fruit": ["08"], "apple": ["08"], "mango": ["08"], "orange": ["08"], "grape": ["08"],
+    "banana": ["08"], "pear": ["08"], "peach": ["08"], "cherry": ["08"], "date": ["08"],
+    "strawberry": ["08"], "watermelon": ["08"], "lemon": ["08"], "lime": ["08"],
+    "pineapple": ["08"], "plum": ["08"], "apricot": ["08"], "guava": ["08"], "pomegranate": ["08"],
+    "vegetable": ["07"], "potato": ["07"], "tomato": ["07"], "onion": ["07"], "garlic": ["07"],
+    "carrot": ["07"], "pea": ["07"], "bean": ["07"], "chilli": ["07"], "pepper": ["07"],
+    "meat": ["02"], "chicken": ["02"], "beef": ["02"], "mutton": ["02"],
+    "fish": ["03"], "shrimp": ["03"], "prawn": ["03"],
+    "dairy": ["04"], "milk": ["04"], "butter": ["04"], "cheese": ["04"], "egg": ["04"],
+    "cereal": ["10"], "rice": ["10"], "wheat": ["10"], "maize": ["10"], "corn": ["10"],
+    "flour": ["11"], "sugar": ["17"],
     "oil": ["15", "27"], "fuel": ["27"], "petroleum": ["27"], "gas": ["27"],
     "tobacco": ["24"], "tea": ["09"], "coffee": ["09"], "spice": ["09"],
     "furniture": ["94"], "toy": ["95"], "footwear": ["64"], "shoe": ["64"],
@@ -389,11 +398,24 @@ def _get_chapters_for_keyword(keyword: str) -> list:
     # Direct match
     if keyword_lower in HS_KEYWORD_CHAPTERS:
         return HS_KEYWORD_CHAPTERS[keyword_lower]
+    # Depluralize: apples→apple, batteries→battery, tomatoes→tomato
+    stems = {keyword_lower}
+    if keyword_lower.endswith("s"):
+        stems.add(keyword_lower[:-1])  # apples → apple
+    if keyword_lower.endswith("es"):
+        stems.add(keyword_lower[:-2])  # tomatoes → tomato
+    if keyword_lower.endswith("ies"):
+        stems.add(keyword_lower[:-3] + "y")  # batteries → battery
+    # Check stems for direct match
+    for stem in stems:
+        if stem in HS_KEYWORD_CHAPTERS:
+            return HS_KEYWORD_CHAPTERS[stem]
     # Partial match (e.g., "iron" matches "iron" key, "medicines" matches "medicine")
     matches = set()
     for key, chapters in HS_KEYWORD_CHAPTERS.items():
-        if key in keyword_lower or keyword_lower in key:
-            matches.update(chapters)
+        for stem in stems:
+            if key in stem or stem in key:
+                matches.update(chapters)
     return sorted(matches)
 
 
