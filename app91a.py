@@ -63,7 +63,7 @@ if OPENAI_API_KEY:
 # Constants
 PDF_URL = "https://download1.fbr.gov.pk/Docs/20241021010287106PakistanCustomsTariff-2024-25.pdf"
 PDF_PATH = "pct_latest.pdf"
-FAISS_INDEX_PATH = "faiss_index"
+FAISS_INDEX_PATH = "/mnt/e/rag_hs_codedata/faiss_index"
 EXCHANGE_RATE_API = "https://api.exchangerate-api.com/v4/latest/PKR"
 NBP_USD_RATE_URL = "https://www.nbp.com.pk/RateSheet/index.aspx?view=ExternalLink"
 WEBOC_TARIFF_URL = "https://www.weboc.gov.pk/Shared/TariffList.aspx"
@@ -892,7 +892,7 @@ with st.sidebar:
 # Initialize session state
 api_key = os.getenv("OPENAI_API_KEY", "").strip()
 if not api_key:
-    st.error("OpenAI API key not set. Please check your .env file at E:\\RAG_HS_Code\\.env or set it manually.")
+    st.error("OpenAI API key not set. Please check your .env file at .env or set it manually.")
     st.stop()
 else:
     vectorstore = get_vectorstore()

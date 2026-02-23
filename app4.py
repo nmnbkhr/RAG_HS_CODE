@@ -19,7 +19,7 @@ load_dotenv()
 # Constants
 PDF_URL = "https://download1.fbr.gov.pk/Docs/20241021010287106PakistanCustomsTariff-2024-25.pdf"
 PDF_PATH = "pct_latest.pdf"
-FAISS_INDEX_PATH = "faiss_index"
+FAISS_INDEX_PATH = "/mnt/e/rag_hs_codedata/faiss_index"
 
 # Function to check if PDF needs updating and download if necessary
 def check_pdf_update(url, local_path):
@@ -227,7 +227,7 @@ with st.sidebar:
 
 # Initialize session state
 if "OPENAI_API_KEY" not in os.environ:
-    st.error("OpenAI API key not set. Please check your .env file at E:\\RAG_HS_Code\\.env or set it manually.")
+    st.error("OpenAI API key not set. Please check your .env file at .env or set it manually.")
 else:
     vectorstore = get_vectorstore()
     qa_chain = setup_qa_chain(vectorstore)

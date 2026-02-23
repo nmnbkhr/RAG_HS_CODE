@@ -28,7 +28,7 @@ if OPENAI_API_KEY:
 # Constants
 PDF_URL = "https://download1.fbr.gov.pk/Docs/20241021010287106PakistanCustomsTariff-2024-25.pdf"
 PDF_PATH = "pct_latest.pdf"
-FAISS_INDEX_PATH = "faiss_index"
+FAISS_INDEX_PATH = "/mnt/e/rag_hs_codedata/faiss_index"
 WEBOC_TARIFF_URL = "https://www.weboc.gov.pk/Shared/TariffList.aspx"
 NBP_USD_RATE_URL = "https://www.nbp.com.pk/RateSheet/index.aspx?view=ExternalLink"
 

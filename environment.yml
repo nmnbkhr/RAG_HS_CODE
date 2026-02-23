@@ -1,0 +1,21 @@
+name: rag_hs_code
+channels:
+  - conda-forge
+  - defaults
+dependencies:
+  - python=3.11
+  - pip
+  - pip:
+      - streamlit>=1.28.0
+      - langchain>=0.1.0
+      - langchain-community>=0.0.10
+      - langchain-openai>=0.0.5
+      - langchain-core>=0.1.0
+      - langchain-text-splitters>=0.0.1
+      - openai>=1.0.0
+      - faiss-cpu>=1.7.4
+      - pypdf>=3.17.0
+      - python-dotenv>=1.0.0
+      - requests>=2.31.0
+      - beautifulsoup4>=4.12.0
+      - lxml>=4.9.0

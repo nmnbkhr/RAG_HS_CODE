@@ -23,7 +23,7 @@ if not os.getenv("OPENAI_API_KEY"):
 PDF_URL = "https://download1.fbr.gov.pk/Docs/20241021010287106PakistanCustomsTariff-2024-25.pdf"
 PDF_PATH = "pct_latest.pdf"
 PDF_OLD_PATH = "pct_old.pdf"
-FAISS_INDEX_PATH = "faiss_index"
+FAISS_INDEX_PATH = "/mnt/e/rag_hs_codedata/faiss_index"
 
 # Step 1: Check if PDF needs updating and download if necessary
 def check_pdf_update(url, local_path, old_path):
