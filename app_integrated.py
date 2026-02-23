@@ -875,6 +875,51 @@ def _get_subcodes(prefix: str, limit: int = 50) -> list:
         except Exception:
             pass
 
+    # 5. Last resort: ask RAG/vectorstore for sub-codes under this prefix
+    if not results:
+        try:
+            chapter_name = HS_CHAPTERS.get(prefix_clean[:2], "")
+            rag_query = (
+                f"List ALL HS/PCT codes (full 8-digit format like XXXX.XXXX) under "
+                f"chapter/heading {prefix_clean} ({chapter_name}). "
+                f"For each code provide: HS Code, Description, Customs Duty (CD) %. "
+                f"Format each as: XXXX.XXXX | Description | XX%"
+            )
+            rag_result = _invoke_qa_chain(rag_query)
+            if rag_result:
+                # Parse lines like "7201.1010 | Description text | 3%"  or "7201.1010 - Description - CD 3%"
+                code_pattern = re.compile(
+                    r'(\d{4}\.\d{4})\s*[\|:\-–]\s*(.+?)(?:\s*[\|:\-–]\s*(?:CD\s*)?(\d+(?:\.\d+)?)\s*%)?$',
+                    re.MULTILINE
+                )
+                for m in code_pattern.finditer(rag_result):
+                    code = m.group(1)
+                    if code.replace('.', '').startswith(prefix_clean) and code not in seen:
+                        seen.add(code)
+                        desc = m.group(2).strip().rstrip('|').strip()
+                        cd = float(m.group(3)) if m.group(3) else None
+                        results.append({
+                            'code': code, 'description': desc,
+                            'unit': _detect_unit(desc), 'customs_duty': cd
+                        })
+                # Also try simpler pattern: just 8-digit codes in the text
+                if not results:
+                    simple_codes = re.findall(r'\b(\d{4}\.\d{4})\b', rag_result)
+                    for code in simple_codes:
+                        if code.replace('.', '').startswith(prefix_clean) and code not in seen:
+                            seen.add(code)
+                            # Extract nearby description text
+                            idx = rag_result.find(code)
+                            nearby = rag_result[idx:idx+150] if idx >= 0 else ""
+                            desc_m = re.search(r'\d{4}\.\d{4}\s*[\|:\-–]?\s*(.+?)(?:\n|$)', nearby)
+                            desc = desc_m.group(1).strip()[:80] if desc_m else ""
+                            results.append({
+                                'code': code, 'description': desc,
+                                'unit': _detect_unit(desc), 'customs_duty': None
+                            })
+        except Exception:
+            pass
+
     results.sort(key=lambda x: x['code'])
     return results[:limit]
 
@@ -1945,13 +1990,23 @@ with tabs[tab_idx]:
 
                     # Text search: show matching codes grouped by chapter
                     if not is_numeric:
-                        try:
-                            all_text_matches = []
-                            seen_codes = set()
+                        all_text_matches = []
+                        seen_codes = set()
 
-                            # 1. Get keyword → chapter mapping and load sub-codes
-                            kw_chapters = _get_chapters_for_keyword(hs_input)
-                            if kw_chapters:
+                        # 1. Show chapter banner for known keywords
+                        kw_chapters = _get_chapters_for_keyword(hs_input)
+                        if kw_chapters:
+                            ch_labels = ", ".join(
+                                f"Chapter {ch} ({HS_CHAPTERS.get(ch, '')})" for ch in kw_chapters
+                            )
+                            st.markdown(
+                                f'<div class="info-box"><b>Related Chapters:</b> {ch_labels}</div>',
+                                unsafe_allow_html=True,
+                            )
+
+                        # 2. Load sub-codes from all sources (WEBOC cache, TIPP, RAG)
+                        if kw_chapters:
+                            with st.spinner(f"Loading HS codes for '{hs_input}'..."):
                                 for ch in kw_chapters:
                                     ch_subcodes = _get_subcodes(ch, limit=50)
                                     for sc in ch_subcodes:
@@ -1959,7 +2014,8 @@ with tabs[tab_idx]:
                                             seen_codes.add(sc['code'])
                                             all_text_matches.append(sc)
 
-                            # 2. Also search WEBOC descriptions for the keyword
+                        # 3. Also search WEBOC descriptions for the keyword
+                        try:
                             weboc_matches = st.session_state.weboc_scraper.search_hs_codes_autocomplete(hs_input, limit=50)
                             for m in weboc_matches:
                                 if m['code'] not in seen_codes:
@@ -1968,33 +2024,34 @@ with tabs[tab_idx]:
                                         'code': m['code'], 'description': m.get('description', ''),
                                         'unit': m.get('unit', 'units'), 'customs_duty': None
                                     })
-
-                            if all_text_matches:
-                                st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
-                                chapter_groups = {}
-                                for m in all_text_matches:
-                                    ch = m['code'].replace('.', '')[:2]
-                                    ch_name = HS_CHAPTERS.get(ch, "")
-                                    key = f"Chapter {ch} — {ch_name}"
-                                    chapter_groups.setdefault(key, []).append(m)
-                                for ch_label, items in sorted(chapter_groups.items()):
-                                    with st.expander(f"{ch_label} ({len(items)} codes)", expanded=len(chapter_groups) == 1):
-                                        for item in items:
-                                            cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
-                                            ic = st.columns([2, 5, 1, 1])
-                                            with ic[0]:
-                                                st.text(item['code'])
-                                            with ic[1]:
-                                                st.text((item.get('description') or '—')[:70])
-                                            with ic[2]:
-                                                st.text(cd_display)
-                                            with ic[3]:
-                                                if st.button("Use", key=f"txt_{item['code']}"):
-                                                    fetched = _fetch_hs_data_all_sources(item['code'])
-                                                    st.session_state.last_search_result = fetched
-                                                    st.rerun()
                         except Exception:
                             pass
+
+                        # 4. Display results grouped by chapter
+                        if all_text_matches:
+                            st.markdown(f"**Matching HS Codes for '{hs_input}' ({len(all_text_matches)} codes):**")
+                            chapter_groups = {}
+                            for m in all_text_matches:
+                                ch = m['code'].replace('.', '')[:2]
+                                ch_name = HS_CHAPTERS.get(ch, "")
+                                key = f"Chapter {ch} — {ch_name}"
+                                chapter_groups.setdefault(key, []).append(m)
+                            for ch_label, items in sorted(chapter_groups.items()):
+                                with st.expander(f"{ch_label} ({len(items)} codes)", expanded=len(chapter_groups) == 1):
+                                    for item in items:
+                                        cd_display = f"{item['customs_duty']}%" if item.get('customs_duty') is not None else "—"
+                                        ic = st.columns([2, 5, 1, 1])
+                                        with ic[0]:
+                                            st.text(item['code'])
+                                        with ic[1]:
+                                            st.text((item.get('description') or '—')[:70])
+                                        with ic[2]:
+                                            st.text(cd_display)
+                                        with ic[3]:
+                                            if st.button("Use", key=f"txt_{item['code']}"):
+                                                fetched = _fetch_hs_data_all_sources(item['code'])
+                                                st.session_state.last_search_result = fetched
+                                                st.rerun()
 
                 # Favorite star button
                 if (MODULE_STATUS.get("favorites_manager")
