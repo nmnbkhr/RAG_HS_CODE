@@ -18,6 +18,8 @@ import sys
 import shutil
 import io
 import json
+import jellyfish
+from rapidfuzz import fuzz as rfuzz
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -392,31 +394,93 @@ HS_KEYWORD_CHAPTERS = {
 }
 
 
+def _depluralize(word: str) -> set:
+    """Return a set of possible singular stems for a word."""
+    stems = {word}
+    if word.endswith("s"):
+        stems.add(word[:-1])       # apples → apple
+    if word.endswith("es"):
+        stems.add(word[:-2])       # tomatoes → tomato
+    if word.endswith("ies"):
+        stems.add(word[:-3] + "y") # batteries → battery
+    return stems
+
+
+def _phonetic_keys(word: str) -> set:
+    """Return a set of phonetic encodings for a word (Soundex + Metaphone)."""
+    keys = set()
+    try:
+        keys.add(jellyfish.soundex(word))
+    except Exception:
+        pass
+    try:
+        keys.add(jellyfish.metaphone(word))
+    except Exception:
+        pass
+    return {k for k in keys if k}
+
+
 def _get_chapters_for_keyword(keyword: str) -> list:
-    """Get matching chapter codes for a keyword. Returns list of 2-digit chapter strings."""
+    """
+    Get matching chapter codes for a keyword using 4-tier matching:
+    1. Direct exact match
+    2. Depluralized stem match
+    3. Substring / partial match
+    4. Phonetic (Soundex + Metaphone) + fuzzy (edit distance) match
+    Returns list of 2-digit chapter strings.
+    """
     keyword_lower = keyword.strip().lower()
-    # Direct match
+    if not keyword_lower:
+        return []
+
+    # --- Tier 1: Direct match ---
     if keyword_lower in HS_KEYWORD_CHAPTERS:
         return HS_KEYWORD_CHAPTERS[keyword_lower]
-    # Depluralize: apples→apple, batteries→battery, tomatoes→tomato
-    stems = {keyword_lower}
-    if keyword_lower.endswith("s"):
-        stems.add(keyword_lower[:-1])  # apples → apple
-    if keyword_lower.endswith("es"):
-        stems.add(keyword_lower[:-2])  # tomatoes → tomato
-    if keyword_lower.endswith("ies"):
-        stems.add(keyword_lower[:-3] + "y")  # batteries → battery
-    # Check stems for direct match
+
+    # --- Tier 2: Depluralized stem match ---
+    stems = _depluralize(keyword_lower)
     for stem in stems:
         if stem in HS_KEYWORD_CHAPTERS:
             return HS_KEYWORD_CHAPTERS[stem]
-    # Partial match (e.g., "iron" matches "iron" key, "medicines" matches "medicine")
-    matches = set()
+
+    # --- Tier 3: Substring / partial match ---
+    partial_matches = set()
     for key, chapters in HS_KEYWORD_CHAPTERS.items():
         for stem in stems:
             if key in stem or stem in key:
-                matches.update(chapters)
-    return sorted(matches)
+                partial_matches.update(chapters)
+    if partial_matches:
+        return sorted(partial_matches)
+
+    # --- Tier 4: Phonetic + Fuzzy matching ---
+    # 4a. Phonetic: compare Soundex/Metaphone codes
+    input_phonetics = set()
+    for stem in stems:
+        input_phonetics.update(_phonetic_keys(stem))
+
+    phonetic_matches = set()
+    for key, chapters in HS_KEYWORD_CHAPTERS.items():
+        key_phonetics = _phonetic_keys(key)
+        if input_phonetics & key_phonetics:  # any phonetic code in common
+            phonetic_matches.update(chapters)
+
+    if phonetic_matches:
+        return sorted(phonetic_matches)
+
+    # 4b. Fuzzy: edit-distance ratio (catches typos like "iren"→"iron", "aples"→"apple")
+    best_score = 0
+    best_chapters = []
+    for key, chapters in HS_KEYWORD_CHAPTERS.items():
+        for stem in stems:
+            score = rfuzz.ratio(stem, key)
+            if score > best_score:
+                best_score = score
+                best_chapters = chapters
+    # Only accept fuzzy matches above 75% similarity
+    if best_score >= 75:
+        return best_chapters
+
+    return []
 
 
 # ---------------------------------------------------------------------------
@@ -599,7 +663,9 @@ class WEBOCTariffScraper:
         self._ensure_cache_loaded()
         if self.hs_code_cache:
             query_clean = query.replace('.', '').lower()
+            is_text = not query_clean.replace('.', '').isdigit()
             results = []
+            # 1. Exact substring match (fast)
             for item in self.hs_code_cache:
                 code_clean = item['code'].replace('.', '')
                 desc_clean = item['description'].lower()
@@ -607,6 +673,22 @@ class WEBOCTariffScraper:
                     results.append(item)
                     if len(results) >= limit:
                         break
+            # 2. If text search found few results, try fuzzy matching on descriptions
+            if is_text and len(results) < limit:
+                seen = {r['code'] for r in results}
+                query_words = set(query_clean.split())
+                fuzzy_scored = []
+                for item in self.hs_code_cache:
+                    if item['code'] in seen:
+                        continue
+                    desc = item['description'].lower()
+                    # Token-set ratio handles word order and partial overlap
+                    score = rfuzz.token_set_ratio(query_clean, desc)
+                    if score >= 70:
+                        fuzzy_scored.append((score, item))
+                fuzzy_scored.sort(key=lambda x: x[0], reverse=True)
+                for _score, item in fuzzy_scored[:limit - len(results)]:
+                    results.append(item)
             return results
         return self.fetch_hs_code_list(query)[:limit]
 
