@@ -426,8 +426,8 @@ def _get_chapters_for_keyword(keyword: str) -> list:
     1. Exact match (iron → iron)
     2. Depluralized stem (apples → apple)
     3. Substring containment (medicines contains medicine)
-    4. Phonetic + fuzzy combined — only if BOTH phonetic codes match
-       AND fuzzy score ≥ 85% (prevents false positives)
+    4. Phonetic match confirmed by fuzzy ≥ 80%
+    5. Pure fuzzy ≥ 90% (catches typos that change phonetic codes)
     Returns list of 2-digit chapter strings.
     """
     keyword_lower = keyword.strip().lower()
@@ -453,30 +453,41 @@ def _get_chapters_for_keyword(keyword: str) -> list:
     if partial_matches:
         return sorted(partial_matches)
 
-    # --- Tier 4: Phonetic + Fuzzy (strict) ---
-    # Require BOTH a phonetic match AND a high fuzzy score to avoid false positives.
-    # Soundex alone groups too many unrelated words (e.g. "lead" vs "lid").
+    # --- Tier 4: Phonetic match confirmed by fuzzy ≥ 70% ---
+    # Phonetic codes already confirm the words sound alike,
+    # so a lower fuzzy threshold is safe (e.g. iren→iron 75%, koper→copper 73%)
     input_phonetics = set()
     for stem in stems:
         input_phonetics.update(_phonetic_keys(stem))
 
-    best_score = 0
-    best_chapters = []
+    ph_best_score = 0
+    ph_best_chapters = []
     for key, chapters in HS_KEYWORD_CHAPTERS.items():
         key_phonetics = _phonetic_keys(key)
-        # Must share at least one phonetic code
         if not (input_phonetics & key_phonetics):
             continue
-        # Among phonetic matches, pick the one with highest fuzzy score
         for stem in stems:
             score = rfuzz.ratio(stem, key)
-            if score > best_score:
-                best_score = score
-                best_chapters = chapters
+            if score > ph_best_score:
+                ph_best_score = score
+                ph_best_chapters = chapters
 
-    # Only accept if fuzzy confirms ≥ 85% similarity
-    if best_score >= 85:
-        return best_chapters
+    if ph_best_score >= 70:
+        return ph_best_chapters
+
+    # --- Tier 5: Pure fuzzy ≥ 90% (strict, no phonetic needed) ---
+    # Catches typos like "applse"→"apple" where phonetic codes differ
+    fz_best_score = 0
+    fz_best_chapters = []
+    for key, chapters in HS_KEYWORD_CHAPTERS.items():
+        for stem in stems:
+            score = rfuzz.ratio(stem, key)
+            if score > fz_best_score:
+                fz_best_score = score
+                fz_best_chapters = chapters
+
+    if fz_best_score >= 90:
+        return fz_best_chapters
 
     return []
 
