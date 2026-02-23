@@ -2308,9 +2308,17 @@ with tabs[tab_idx]:
                 if disambig:
                     st.warning(disambig)
 
-                # Likely codes from LLM
+                # Likely codes from LLM — fetch rates for each
                 likely = llm.get('likely_codes', [])
                 if likely:
+                    # Fetch duty rates for all suggested codes upfront
+                    _smart_rates = {}
+                    with st.spinner("Fetching duty rates..."):
+                        for suggestion in likely:
+                            _c = suggestion.get('code', '')
+                            if _c:
+                                _smart_rates[_c] = _fetch_hs_data_all_sources(_c)
+
                     for i, suggestion in enumerate(likely):
                         code = suggestion.get('code', '')
                         desc = suggestion.get('description', '')
@@ -2326,8 +2334,16 @@ with tabs[tab_idx]:
                         heading_ctx = get_heading_description(code) if MODULE_STATUS.get("llm_search") else ''
                         is_part = is_part_not_product(desc) if MODULE_STATUS.get("llm_search") else False
 
+                        # Get fetched rates
+                        rates = _smart_rates.get(code, {})
+                        has_rates = rates.get('status') == 'success'
+
+                        # Build rate snippet for expander title
+                        _title_rate = f" | CD: {rates.get('customs_duty', '?')}%" if has_rates else ""
+                        _conf_tag = '[HIGH]' if conf == 'high' else '[MED]' if conf == 'medium' else '[LOW]'
+
                         with st.expander(
-                            f"{'[HIGH]' if conf == 'high' else '[MED]' if conf == 'medium' else '[LOW]'} {code} — {desc[:80]}",
+                            f"{_conf_tag} {code} — {desc[:70]}{_title_rate}",
                             expanded=(i == 0),
                         ):
                             # Hierarchy breadcrumb
@@ -2342,7 +2358,36 @@ with tabs[tab_idx]:
                             if heading_ctx:
                                 st.markdown(f"**Heading:** {heading_ctx}")
 
-                            st.markdown(f"**Description:** {desc}")
+                            # Use fetched description if richer than LLM description
+                            display_desc = rates.get('description') or desc if has_rates else desc
+                            st.markdown(f"**Description:** {display_desc}")
+
+                            # Duty rates card
+                            if has_rates:
+                                _cd = rates.get('customs_duty', 0)
+                                _st = rates.get('sales_tax', 18)
+                                _it = rates.get('income_tax', 6)
+                                _ad = rates.get('additional_duty')
+                                _rd = rates.get('regulatory_duty')
+                                _fed = rates.get('federal_excise_duty')
+                                _unit = rates.get('unit_of_measure', '')
+                                _src = rates.get('source', '')
+
+                                st.markdown(f'''
+                                <div style="background:#E8F5E9;border-left:4px solid #1B5E20;padding:12px;border-radius:6px;margin:8px 0">
+                                    <div style="display:flex;flex-wrap:wrap;gap:10px;align-items:center">
+                                        <span style="background:#1B5E20;color:white;padding:3px 10px;border-radius:4px;font-size:13px">CD: {_cd}%</span>
+                                        <span style="background:#2E7D32;color:white;padding:3px 10px;border-radius:4px;font-size:13px">ST: {_st}%</span>
+                                        <span style="background:#388E3C;color:white;padding:3px 10px;border-radius:4px;font-size:13px">IT: {_it}%</span>
+                                        {"<span style='background:#5D4037;color:white;padding:3px 10px;border-radius:4px;font-size:13px'>AD: " + str(_ad) + "%</span>" if _ad else ""}
+                                        {"<span style='background:#E65100;color:white;padding:3px 10px;border-radius:4px;font-size:13px'>RD: " + str(_rd) + "%</span>" if _rd else ""}
+                                        {"<span style='background:#6A1B9A;color:white;padding:3px 10px;border-radius:4px;font-size:13px'>FED: " + str(_fed) + "%</span>" if _fed else ""}
+                                    </div>
+                                    <div style="font-size:12px;color:#666;margin-top:6px">Source: {_src}{" | Unit: " + _unit if _unit else ""}</div>
+                                </div>''', unsafe_allow_html=True)
+                            else:
+                                st.caption("Rates not found in database for this code")
+
                             st.markdown(
                                 f'**Confidence:** <span style="background:{badge_color};color:white;'
                                 f'padding:2px 8px;border-radius:4px;font-size:13px">{conf_label}</span>',
@@ -2353,17 +2398,10 @@ with tabs[tab_idx]:
                             if is_part:
                                 st.warning("This is a PART/ACCESSORY, not a complete product")
 
-                            bcol1, bcol2 = st.columns(2)
-                            with bcol1:
+                            if has_rates:
                                 if st.button("Use in Calculator", key=f"calc_{code}_{i}"):
-                                    all_source_data = _fetch_hs_data_all_sources(code)
-                                    st.session_state.last_search_result = all_source_data
-                                    st.session_state.prefill_data = all_source_data
-                                    st.rerun()
-                            with bcol2:
-                                if st.button("Lookup Full Rates", key=f"weboc_{code}_{i}"):
-                                    all_source_data = _fetch_hs_data_all_sources(code)
-                                    st.session_state.last_search_result = all_source_data
+                                    st.session_state.last_search_result = rates
+                                    st.session_state.prefill_data = rates
                                     st.rerun()
 
                 # Data matches from tariff cache
